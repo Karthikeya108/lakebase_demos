@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Insurance Data Explorer - Lakehouse vs Lakebase</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .editing { background-color: #fefce8 !important; }
+    .spinner { border: 3px solid #f3f3f3; border-top: 3px solid #3b82f6; border-radius: 50%; width: 20px; height: 20px; animation: spin 0.8s linear infinite; display: inline-block; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+  <div class="max-w-7xl mx-auto px-4 py-6">
+    <!-- Header -->
+    <div class="mb-6">
+      <h1 class="text-3xl font-bold text-gray-900">Insurance Data Explorer</h1>
+      <p class="text-gray-500 mt-1">Compare Databricks DBSQL (Lakehouse) vs Lakebase Autoscaling performance</p>
+    </div>
+
+    <!-- Source Toggle -->
+    <div class="flex items-center gap-4 mb-6 bg-white rounded-lg shadow p-4">
+      <span class="font-medium text-gray-700">Data Source:</span>
+      <div class="flex bg-gray-100 rounded-lg p-1">
+        <button id="btn-lakehouse" onclick="setSource('lakehouse')"
+          class="px-4 py-2 rounded-md text-sm font-medium transition-all">
+          Lakehouse (DBSQL)
+        </button>
+        <button id="btn-lakebase" onclick="setSource('lakebase')"
+          class="px-4 py-2 rounded-md text-sm font-medium transition-all">
+          Lakebase (Postgres)
+        </button>
+      </div>
+      <div id="response-time" class="ml-auto text-sm text-gray-500"></div>
+    </div>
+
+    <!-- Table Selector -->
+    <div class="flex gap-2 mb-6 flex-wrap">
+      <span class="font-medium text-gray-700 self-center mr-2">Table:</span>
+      <div id="table-buttons" class="flex gap-2 flex-wrap"></div>
+    </div>
+
+    <!-- Data Table -->
+    <div class="bg-white rounded-lg shadow overflow-hidden">
+      <div id="loading" class="hidden p-8 text-center">
+        <div class="spinner mx-auto mb-2"></div>
+        <p class="text-gray-500">Loading data...</p>
+      </div>
+      <div id="table-container" class="overflow-x-auto">
+        <p class="p-8 text-center text-gray-400">Select a table to view data</p>
+      </div>
+    </div>
+
+    <!-- Pagination -->
+    <div id="pagination" class="hidden flex items-center justify-between mt-4 bg-white rounded-lg shadow p-4">
+      <div class="text-sm text-gray-600">
+        Showing <span id="show-start"></span>-<span id="show-end"></span> of <span id="show-total"></span> records
+      </div>
+      <div class="flex gap-2">
+        <button id="btn-prev" onclick="changePage(-1)" class="px-3 py-1 rounded border text-sm hover:bg-gray-50 disabled:opacity-50">Previous</button>
+        <span id="page-info" class="px-3 py-1 text-sm self-center"></span>
+        <button id="btn-next" onclick="changePage(1)" class="px-3 py-1 rounded border text-sm hover:bg-gray-50 disabled:opacity-50">Next</button>
+      </div>
+    </div>
+
+    <!-- Edit hint -->
+    <p class="text-xs text-gray-400 mt-2">Double-click a cell to edit. Press Enter to save, Escape to cancel.</p>
+  </div>
+
+  <script>
+    let currentSource = 'lakehouse';
+    let currentTable = null;
+    let currentPage = 1;
+    let currentData = null;
+    const PAGE_SIZE = 10;
+
+    const PK_MAP = {
+      policy_types: 'policy_type_id', agents: 'agent_id', customers: 'customer_id',
+      policies: 'policy_id', vehicles: 'vehicle_id', beneficiaries: 'beneficiary_id',
+      coverages: 'coverage_id', premiums: 'premium_id', claims: 'claim_id',
+      claim_payments: 'payment_id'
+    };
+
+    const TABLES = [
+      'policy_types', 'agents', 'customers', 'policies', 'vehicles',
+      'beneficiaries', 'coverages', 'premiums', 'claims', 'claim_payments'
+    ];
+
+    function init() {
+      const container = document.getElementById('table-buttons');
+      TABLES.forEach(t => {
+        const btn = document.createElement('button');
+        btn.id = `tbl-${t}`;
+        btn.textContent = t.replace(/_/g, ' ');
+        btn.className = 'px-3 py-1.5 rounded-md text-sm border hover:bg-blue-50 transition-all capitalize';
+        btn.onclick = () => selectTable(t);
+        container.appendChild(btn);
+      });
+      setSource('lakehouse');
+    }
+
+    function setSource(src) {
+      currentSource = src;
+      document.getElementById('btn-lakehouse').className =
+        src === 'lakehouse'
+          ? 'px-4 py-2 rounded-md text-sm font-medium bg-blue-600 text-white shadow'
+          : 'px-4 py-2 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-200';
+      document.getElementById('btn-lakebase').className =
+        src === 'lakebase'
+          ? 'px-4 py-2 rounded-md text-sm font-medium bg-green-600 text-white shadow'
+          : 'px-4 py-2 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-200';
+      if (currentTable) {
+        currentPage = 1;
+        loadData();
+      }
+    }
+
+    function selectTable(table) {
+      currentTable = table;
+      currentPage = 1;
+      TABLES.forEach(t => {
+        const btn = document.getElementById(`tbl-${t}`);
+        btn.className = t === table
+          ? 'px-3 py-1.5 rounded-md text-sm border-2 border-blue-500 bg-blue-50 font-medium capitalize'
+          : 'px-3 py-1.5 rounded-md text-sm border hover:bg-blue-50 transition-all capitalize';
+      });
+      loadData();
+    }
+
+    async function loadData() {
+      const loading = document.getElementById('loading');
+      const container = document.getElementById('table-container');
+      loading.classList.remove('hidden');
+      container.innerHTML = '';
+
+      try {
+        const res = await fetch(`/api/data?table=${currentTable}&source=${currentSource}&page=${currentPage}&page_size=${PAGE_SIZE}`);
+        if (!res.ok) throw new Error(await res.text());
+        currentData = await res.json();
+        renderTable(currentData);
+        renderPagination(currentData);
+        const color = currentSource === 'lakehouse' ? 'text-blue-600' : 'text-green-600';
+        document.getElementById('response-time').innerHTML =
+          `<span class="${color} font-medium">${currentData.elapsed_ms.toFixed(1)} ms</span> (${currentSource})`;
+      } catch (err) {
+        container.innerHTML = `<p class="p-8 text-center text-red-500">Error: ${err.message}</p>`;
+      } finally {
+        loading.classList.add('hidden');
+      }
+    }
+
+    function renderTable(data) {
+      const container = document.getElementById('table-container');
+      if (!data.rows.length) {
+        container.innerHTML = '<p class="p-8 text-center text-gray-400">No data found</p>';
+        return;
+      }
+      const pk = PK_MAP[data.table];
+      let html = '<table class="min-w-full divide-y divide-gray-200"><thead class="bg-gray-50"><tr>';
+      data.columns.forEach(col => {
+        html += `<th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">${col}</th>`;
+      });
+      html += '</tr></thead><tbody class="bg-white divide-y divide-gray-200">';
+
+      data.rows.forEach((row, ri) => {
+        html += '<tr class="hover:bg-gray-50">';
+        data.columns.forEach(col => {
+          const val = row[col] !== null && row[col] !== undefined ? row[col] : '';
+          const editable = col !== pk;
+          const pkVal = row[pk];
+          html += `<td class="px-4 py-2 text-sm text-gray-700 whitespace-nowrap ${editable ? 'cursor-pointer' : ''}"
+            ${editable ? `ondblclick="startEdit(this, '${data.table}', '${pk}', '${pkVal}', '${col}')"` : ''}>
+            ${formatValue(col, val)}</td>`;
+        });
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+      container.innerHTML = html;
+    }
+
+    function formatValue(col, val) {
+      if (val === '' || val === null) return '<span class="text-gray-300">—</span>';
+      if (typeof val === 'boolean') return val ? '✓' : '✗';
+      return String(val);
+    }
+
+    function startEdit(td, table, pkCol, pkVal, col) {
+      if (td.querySelector('input')) return;
+      const original = td.textContent.trim();
+      td.classList.add('editing');
+      const input = document.createElement('input');
+      input.type = 'text';
+      input.value = original === '—' ? '' : original;
+      input.className = 'w-full px-1 py-0.5 border rounded text-sm focus:outline-none focus:ring-2 focus:ring-blue-400';
+      input.onkeydown = async (e) => {
+        if (e.key === 'Enter') {
+          await saveEdit(td, table, pkCol, pkVal, col, input.value, original);
+        } else if (e.key === 'Escape') {
+          td.textContent = original;
+          td.classList.remove('editing');
+        }
+      };
+      input.onblur = () => {
+        setTimeout(() => {
+          if (td.querySelector('input')) {
+            td.textContent = original;
+            td.classList.remove('editing');
+          }
+        }, 200);
+      };
+      td.textContent = '';
+      td.appendChild(input);
+      input.focus();
+      input.select();
+    }
+
+    async function saveEdit(td, table, pkCol, pkVal, col, newVal, original) {
+      td.innerHTML = '<div class="spinner mx-auto"></div>';
+      try {
+        const res = await fetch(`/api/update?source=${currentSource}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            table, pk_column: pkCol, pk_value: isNaN(pkVal) ? pkVal : Number(pkVal),
+            column: col, value: newVal === '' ? null : (isNaN(newVal) ? newVal : Number(newVal))
+          })
+        });
+        if (!res.ok) throw new Error(await res.text());
+        const result = await res.json();
+        td.textContent = newVal || '—';
+        td.classList.remove('editing');
+        const color = currentSource === 'lakehouse' ? 'text-blue-600' : 'text-green-600';
+        document.getElementById('response-time').innerHTML =
+          `Update: <span class="${color} font-medium">${result.elapsed_ms.toFixed(1)} ms</span> (${currentSource})`;
+      } catch (err) {
+        td.textContent = original;
+        td.classList.remove('editing');
+        alert('Update failed: ' + err.message);
+      }
+    }
+
+    function renderPagination(data) {
+      const pag = document.getElementById('pagination');
+      const totalPages = Math.ceil(data.total_count / data.page_size);
+      if (totalPages <= 1 && data.total_count <= PAGE_SIZE) {
+        pag.classList.add('hidden');
+        return;
+      }
+      pag.classList.remove('hidden');
+      const start = (data.page - 1) * data.page_size + 1;
+      const end = Math.min(data.page * data.page_size, data.total_count);
+      document.getElementById('show-start').textContent = start;
+      document.getElementById('show-end').textContent = end;
+      document.getElementById('show-total').textContent = data.total_count.toLocaleString();
+      document.getElementById('page-info').textContent = `Page ${data.page} of ${totalPages}`;
+      document.getElementById('btn-prev').disabled = data.page <= 1;
+      document.getElementById('btn-next').disabled = data.page >= totalPages;
+    }
+
+    function changePage(delta) {
+      currentPage += delta;
+      loadData();
+    }
+
+    init();
+  </script>
+</body>
+</html>

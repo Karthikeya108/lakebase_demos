@@ -1,0 +1,17 @@
+command:
+  - uvicorn
+  - main:app
+  - --host
+  - 0.0.0.0
+  - --port
+  - "8000"
+
+env:
+  - name: DBSQL_WAREHOUSE_ID
+    value: "040fbcbc0f11bbaa"
+  - name: LAKEBASE_HOST
+    value: "ep-old-rice-ean8eftx.database.northeurope.azuredatabricks.net"
+  - name: LAKEBASE_DB
+    value: "tko_2026_demo"
+  - name: LAKEBASE_ENDPOINT
+    value: "projects/tko-2026-demo/branches/production/endpoints/primary"
