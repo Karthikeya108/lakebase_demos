@@ -5,6 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Insurance Data Explorer - Lakehouse vs Lakebase</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      safelist: [
+        'bg-blue-50', 'bg-blue-100', 'bg-green-50', 'bg-green-100',
+        'border-blue-200', 'border-green-200',
+        'text-blue-700', 'text-green-700',
+      ]
+    }
+  </script>
   <style>
     .editing { background-color: #fefce8 !important; }
     .spinner { border: 3px solid #f3f3f3; border-top: 3px solid #3b82f6; border-radius: 50%; width: 20px; height: 20px; animation: spin 0.8s linear infinite; display: inline-block; }
@@ -22,17 +31,43 @@
     <!-- Source Toggle -->
     <div class="flex items-center gap-4 mb-6 bg-white rounded-lg shadow p-4">
       <span class="font-medium text-gray-700">Data Source:</span>
-      <div class="flex bg-gray-100 rounded-lg p-1">
-        <button id="btn-lakehouse" onclick="setSource('lakehouse')"
-          class="px-4 py-2 rounded-md text-sm font-medium transition-all">
-          Lakehouse (DBSQL)
-        </button>
-        <button id="btn-lakebase" onclick="setSource('lakebase')"
-          class="px-4 py-2 rounded-md text-sm font-medium transition-all">
-          Lakebase (Postgres)
-        </button>
+      <div class="flex gap-1 bg-gray-100 rounded-lg p-1">
+        <div class="flex gap-0.5">
+          <button id="btn-dbsql_statement" onclick="setSource('dbsql_statement')"
+            class="px-3 py-2 rounded-md text-sm font-medium transition-all" title="Databricks Statement Execution API">
+            DBSQL Statement API
+          </button>
+          <button id="btn-dbsql_connector" onclick="setSource('dbsql_connector')"
+            class="px-3 py-2 rounded-md text-sm font-medium transition-all" title="Databricks SQL Connector (Thrift/JDBC)">
+            DBSQL Connector
+          </button>
+        </div>
+        <div class="w-px bg-gray-300 mx-1"></div>
+        <div class="flex gap-0.5">
+          <button id="btn-lakebase_pg" onclick="setSource('lakebase_pg')"
+            class="px-3 py-2 rounded-md text-sm font-medium transition-all" title="Lakebase via psycopg (Postgres wire protocol)">
+            Lakebase Postgres
+          </button>
+          <button id="btn-lakebase_dataapi" onclick="setSource('lakebase_dataapi')"
+            class="px-3 py-2 rounded-md text-sm font-medium transition-all" title="Lakebase Data API (PostgREST)">
+            Lakebase Data API
+          </button>
+        </div>
       </div>
-      <div id="response-time" class="ml-auto text-sm text-gray-500"></div>
+    </div>
+
+    <!-- Response Time Banner -->
+    <div id="response-time-banner" class="hidden mb-6 rounded-lg shadow p-5">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <span id="rt-label" class="text-sm font-medium text-gray-500 uppercase tracking-wide">Query Response</span>
+          <span id="rt-source" class="text-sm font-medium px-2 py-0.5 rounded-full"></span>
+        </div>
+        <div class="flex items-baseline gap-2">
+          <span id="rt-value" class="text-4xl font-bold tabular-nums"></span>
+          <span id="rt-unit" class="text-lg font-medium text-gray-400">ms</span>
+        </div>
+      </div>
     </div>
 
     <!-- Table Selector -->
@@ -69,11 +104,27 @@
   </div>
 
   <script>
-    let currentSource = 'lakehouse';
+    let currentSource = 'dbsql_statement';
     let currentTable = null;
     let currentPage = 1;
     let currentData = null;
     const PAGE_SIZE = 10;
+
+    const SOURCE_BUTTONS = ['dbsql_statement', 'dbsql_connector', 'lakebase_pg', 'lakebase_dataapi'];
+
+    const SOURCE_COLORS = {
+      dbsql_statement:  { active: 'bg-blue-600 text-white shadow', idle: 'text-gray-600 hover:bg-gray-200' },
+      dbsql_connector:  { active: 'bg-blue-600 text-white shadow', idle: 'text-gray-600 hover:bg-gray-200' },
+      lakebase_pg:      { active: 'bg-green-600 text-white shadow', idle: 'text-gray-600 hover:bg-gray-200' },
+      lakebase_dataapi: { active: 'bg-green-600 text-white shadow', idle: 'text-gray-600 hover:bg-gray-200' },
+    };
+
+    const SOURCE_LABELS = {
+      dbsql_statement: 'DBSQL Statement API',
+      dbsql_connector: 'DBSQL Connector',
+      lakebase_pg: 'Lakebase Postgres',
+      lakebase_dataapi: 'Lakebase Data API',
+    };
 
     const PK_MAP = {
       policy_types: 'policy_type_id', agents: 'agent_id', customers: 'customer_id',
@@ -97,23 +148,37 @@
         btn.onclick = () => selectTable(t);
         container.appendChild(btn);
       });
-      setSource('lakehouse');
+      setSource('dbsql_statement');
     }
 
     function setSource(src) {
       currentSource = src;
-      document.getElementById('btn-lakehouse').className =
-        src === 'lakehouse'
-          ? 'px-4 py-2 rounded-md text-sm font-medium bg-blue-600 text-white shadow'
-          : 'px-4 py-2 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-200';
-      document.getElementById('btn-lakebase').className =
-        src === 'lakebase'
-          ? 'px-4 py-2 rounded-md text-sm font-medium bg-green-600 text-white shadow'
-          : 'px-4 py-2 rounded-md text-sm font-medium text-gray-600 hover:bg-gray-200';
+      SOURCE_BUTTONS.forEach(s => {
+        const btn = document.getElementById(`btn-${s}`);
+        const colors = SOURCE_COLORS[s];
+        btn.className = `px-3 py-2 rounded-md text-sm font-medium transition-all ${s === src ? colors.active : colors.idle}`;
+      });
       if (currentTable) {
         currentPage = 1;
         loadData();
       }
+    }
+
+    function getSourceColor() {
+      return currentSource.startsWith('dbsql') ? 'blue' : 'green';
+    }
+
+    function showResponseTime(ms, label, isUpdate) {
+      const banner = document.getElementById('response-time-banner');
+      const color = getSourceColor();
+      banner.className = `mb-6 rounded-lg shadow p-5 bg-${color}-50 border border-${color}-200`;
+      document.getElementById('rt-label').textContent = isUpdate ? 'Update Response' : 'Query Response';
+      const srcBadge = document.getElementById('rt-source');
+      srcBadge.textContent = SOURCE_LABELS[currentSource];
+      srcBadge.className = `text-sm font-medium px-2 py-0.5 rounded-full bg-${color}-100 text-${color}-700`;
+      document.getElementById('rt-value').className = `text-4xl font-bold tabular-nums text-${color}-700`;
+      document.getElementById('rt-value').textContent = ms.toFixed(1);
+      banner.classList.remove('hidden');
     }
 
     function selectTable(table) {
@@ -140,9 +205,7 @@
         currentData = await res.json();
         renderTable(currentData);
         renderPagination(currentData);
-        const color = currentSource === 'lakehouse' ? 'text-blue-600' : 'text-green-600';
-        document.getElementById('response-time').innerHTML =
-          `<span class="${color} font-medium">${currentData.elapsed_ms.toFixed(1)} ms</span> (${currentSource})`;
+        showResponseTime(currentData.elapsed_ms, SOURCE_LABELS[currentSource], false);
       } catch (err) {
         container.innerHTML = `<p class="p-8 text-center text-red-500">Error: ${err.message}</p>`;
       } finally {
@@ -230,9 +293,7 @@
         const result = await res.json();
         td.textContent = newVal || '—';
         td.classList.remove('editing');
-        const color = currentSource === 'lakehouse' ? 'text-blue-600' : 'text-green-600';
-        document.getElementById('response-time').innerHTML =
-          `Update: <span class="${color} font-medium">${result.elapsed_ms.toFixed(1)} ms</span> (${currentSource})`;
+        showResponseTime(result.elapsed_ms, SOURCE_LABELS[currentSource], true);
       } catch (err) {
         td.textContent = original;
         td.classList.remove('editing');

@@ -167,6 +167,8 @@ source_code_path = None
 if app_config.active_deployment:
     source_code_path = app_config.active_deployment.source_code_path
 
+lakebase_data_api_url = f"https://{lakebase_host}/api/2.0/workspace/{w.get_workspace_id()}/rest/{lakebase_db}"
+
 print(f"Updating app.yaml with discovered resource IDs...")
 print(f"  DBSQL_WAREHOUSE_ID = {warehouse_id}")
 print(f"  LAKEBASE_HOST = {lakebase_host}")
@@ -174,6 +176,7 @@ print(f"  LAKEBASE_DB = {lakebase_db}")
 print(f"  LAKEBASE_ENDPOINT = {lakebase_endpoint}")
 print(f"  UC_CATALOG = {catalog}")
 print(f"  UC_SCHEMA = {schema}")
+print(f"  LAKEBASE_DATA_API_URL = {lakebase_data_api_url}")
 
 # Write updated app.yaml to the app source directory
 app_yaml_content = f"""command:
@@ -197,6 +200,8 @@ env:
     value: "{catalog}"
   - name: UC_SCHEMA
     value: "{schema}"
+  - name: LAKEBASE_DATA_API_URL
+    value: "{lakebase_data_api_url}"
 """
 
 # Update the app.yaml in workspace

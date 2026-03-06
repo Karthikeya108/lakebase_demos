@@ -1,14 +1,23 @@
 # TKO 2026 - Insurance Data Explorer
 
-Compare Databricks DBSQL (Lakehouse) vs Lakebase Autoscaling performance for transactional workloads. A Databricks App lets you browse and edit 10 insurance tables (~570K total records) through both engines side by side.
+Compare Databricks DBSQL (Lakehouse) vs Lakebase Autoscaling performance for transactional workloads. A Databricks App lets you browse and edit 10 insurance tables (~570K total records) through four different data access methods side by side.
 
 All resources (SQL warehouse, Lakebase project, UC tables, app configuration) are created and accessed using the Databricks identity of whoever runs the setup. No hardcoded IDs or credentials -- everything is discovered dynamically.
 
 ## Architecture
 
-- **Lakehouse**: Delta tables in Unity Catalog, queried via DBSQL Statement Execution API through a Photon-enabled SQL warehouse (created by the setup job)
-- **Lakebase**: PostgreSQL 17 tables in Lakebase Autoscaling, queried via psycopg3 with OAuth authentication (project created by the setup job)
-- **App**: FastAPI + Tailwind CSS served as a Databricks App, configured automatically by the setup job
+The app supports four data access methods across two engines:
+
+| Method | Engine | Protocol | Description |
+|--------|--------|----------|-------------|
+| **DBSQL Statement API** | Lakehouse | REST | Databricks Statement Execution API via SDK |
+| **DBSQL Connector** | Lakehouse | Thrift | databricks-sql-connector (JDBC/ODBC) |
+| **Lakebase Postgres** | Lakebase | Postgres wire | psycopg3 with OAuth authentication |
+| **Lakebase Data API** | Lakebase | REST (PostgREST) | RESTful HTTP interface with OAuth |
+
+- **Lakehouse**: Delta tables in Unity Catalog, queried via a Photon-enabled SQL warehouse
+- **Lakebase**: PostgreSQL 17 tables in Lakebase Autoscaling, queried via psycopg3 or the Data API
+- **App**: FastAPI + Tailwind CSS served as a Databricks App
 
 ## Data Model
 
@@ -39,7 +48,7 @@ tko_2026/
 │   └── 03_grant_app_access.py        # Grants app SP access + configures app env vars
 ├── app/                              # FastAPI app source
 │   ├── app.yaml                      # App runtime config (populated by setup job)
-│   ├── main.py                       # FastAPI backend (DBSQL + Lakebase queries)
+│   ├── main.py                       # FastAPI backend (4 data access methods)
 │   ├── requirements.txt              # Python dependencies
 │   └── static/
 │       └── index.html                # Frontend (Tailwind CSS, inline JS)
@@ -69,6 +78,45 @@ databricks bundle run insurance_app
 # 4. Run the setup job (creates all infrastructure, data, and configures the app)
 databricks bundle run setup_insurance_demo
 ```
+
+### Post-Deploy: Lakebase Data API Setup
+
+The Data API requires additional manual steps after the setup job completes:
+
+1. **Enable the Data API** in the Lakebase UI:
+   - Navigate to your Lakebase project > Data API
+   - Click **Enable Data API**
+
+2. **Expose the `lakebase_demo` schema**:
+   - On the Data API page, go to **Settings** > **Advanced settings**
+   - Under **Exposed schemas**, add `lakebase_demo`
+   - Click **Save**
+
+3. **Create the SP role for Data API access** (run in the Lakebase SQL Editor):
+   ```sql
+   -- Create the SP role using the databricks_auth extension
+   CREATE EXTENSION IF NOT EXISTS databricks_auth;
+   SELECT databricks_create_role('<app-sp-client-id>', 'SERVICE_PRINCIPAL');
+
+   -- Grant the SP role to the authenticator (required for Data API)
+   GRANT "<app-sp-client-id>" TO authenticator;
+
+   -- Grant schema and table access
+   GRANT USAGE ON SCHEMA lakebase_demo TO "<app-sp-client-id>";
+   GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA lakebase_demo TO "<app-sp-client-id>";
+   ```
+
+   Replace `<app-sp-client-id>` with the app's service principal client ID (found via the Databricks Apps UI or `databricks apps get <app-name>`).
+
+4. **Refresh the schema cache** in the Data API page after granting permissions.
+
+5. **Update `LAKEBASE_DATA_API_URL`** in `app.yaml`:
+   ```
+   https://<lakebase-host>/api/2.0/workspace/<workspace-id>/rest/<database-name>
+   ```
+   Then redeploy the app: `databricks bundle deploy && databricks bundle run insurance_app`
+
+> **Important**: The database owner (whoever created the Lakebase project) cannot use the Data API directly. The `authenticator` role cannot assume owner privileges. The app uses the service principal's token instead. Non-owner users can be added by creating their role with `databricks_create_role()`, granting it to `authenticator`, and granting schema/table access.
 
 ### What the Setup Job Does
 
@@ -118,11 +166,23 @@ databricks bundle run setup_insurance_demo -t prod
 
 ## App Features
 
-- Toggle between **Lakehouse** (DBSQL) and **Lakebase** (Postgres) data sources
+- Four data source buttons: **DBSQL Statement API**, **DBSQL Connector** (both blue), **Lakebase Postgres**, **Lakebase Data API** (both green)
 - Browse all 10 tables with a table selector
 - Paginated data view (10 records per page)
 - Inline cell editing (double-click to edit, Enter to save)
-- Response time display comparing both engines
+- Response time display comparing all four access methods
+
+## Data API Notes
+
+The Lakebase Data API uses a PostgREST-compatible REST interface. Key details:
+
+- **URL format**: `{REST_ENDPOINT}/{schema}/{table}` (e.g., `.../rest/tko_2026_demo/lakebase_demo/policy_types`)
+- **Authentication**: OAuth bearer token in the `Authorization` header
+- **Pagination**: `?limit=N&offset=M` query parameters; use `Prefer: count=exact` header for total counts
+- **Filtering**: PostgREST syntax (e.g., `?id=eq.5`, `?status=in.(ACTIVE,PENDING)`)
+- **Updates**: HTTP PATCH with `?pk_col=eq.value` filter
+- **Role setup**: SP roles must be created via `databricks_create_role()` (not the SDK) and explicitly granted to `authenticator`
+- **DB owner limitation**: The database owner cannot use the Data API; use a service principal or non-owner user
 
 ## Cleanup
 
