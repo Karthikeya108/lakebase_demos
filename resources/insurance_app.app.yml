@@ -1,0 +1,6 @@
+resources:
+  apps:
+    insurance_app:
+      name: "tko-insurance-app"
+      description: "Insurance Data Explorer - Lakehouse vs Lakebase Performance Comparison"
+      source_code_path: ../app

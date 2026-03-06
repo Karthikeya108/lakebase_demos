@@ -6,12 +6,18 @@ command:
   - --port
   - "8000"
 
+# Environment variables are populated by the setup job (task 03_configure_app).
+# Run `databricks bundle run setup_insurance_demo` after first deploy to configure.
 env:
   - name: DBSQL_WAREHOUSE_ID
-    value: "040fbcbc0f11bbaa"
+    value: "PLACEHOLDER_RUN_SETUP_JOB"
   - name: LAKEBASE_HOST
-    value: "ep-old-rice-ean8eftx.database.northeurope.azuredatabricks.net"
+    value: "PLACEHOLDER_RUN_SETUP_JOB"
   - name: LAKEBASE_DB
-    value: "tko_2026_demo"
+    value: "PLACEHOLDER_RUN_SETUP_JOB"
   - name: LAKEBASE_ENDPOINT
-    value: "projects/tko-2026-demo/branches/production/endpoints/primary"
+    value: "PLACEHOLDER_RUN_SETUP_JOB"
+  - name: UC_CATALOG
+    value: "PLACEHOLDER_RUN_SETUP_JOB"
+  - name: UC_SCHEMA
+    value: "PLACEHOLDER_RUN_SETUP_JOB"

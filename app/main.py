@@ -13,17 +13,14 @@ from databricks.sdk import WorkspaceClient
 app = FastAPI(title="Insurance Data Explorer")
 w = WorkspaceClient()
 
-# Config
-DBSQL_WAREHOUSE_ID = os.getenv("DBSQL_WAREHOUSE_ID", "040fbcbc0f11bbaa")
-LAKEBASE_HOST = os.getenv("LAKEBASE_HOST", "ep-old-rice-ean8eftx.database.northeurope.azuredatabricks.net")
-LAKEBASE_DB = os.getenv("LAKEBASE_DB", "tko_2026_demo")
-LAKEBASE_SCHEMA = "lakebase_demo"
-UC_CATALOG = "tko_2026"
-UC_SCHEMA = "lakebase_demo"
-LAKEBASE_ENDPOINT = os.getenv(
-    "LAKEBASE_ENDPOINT",
-    "projects/tko-2026-demo/branches/production/endpoints/primary",
-)
+# Config - all values set by the setup job via app.yaml env vars
+DBSQL_WAREHOUSE_ID = os.environ["DBSQL_WAREHOUSE_ID"]
+LAKEBASE_HOST = os.environ["LAKEBASE_HOST"]
+LAKEBASE_DB = os.environ["LAKEBASE_DB"]
+LAKEBASE_SCHEMA = os.getenv("LAKEBASE_SCHEMA", "lakebase_demo")
+UC_CATALOG = os.environ["UC_CATALOG"]
+UC_SCHEMA = os.environ["UC_SCHEMA"]
+LAKEBASE_ENDPOINT = os.environ["LAKEBASE_ENDPOINT"]
 
 TABLES = [
     "policy_types", "agents", "customers", "policies", "vehicles",

@@ -1,0 +1,62 @@
+resources:
+  jobs:
+    setup_insurance_demo:
+      name: "[${bundle.target}] TKO 2026 - Setup Insurance Demo"
+      tasks:
+        - task_key: "01_setup_lakehouse"
+          description: "Create UC catalog/schema, SQL warehouse, and populate Delta tables"
+          notebook_task:
+            notebook_path: ../src/notebooks/01_setup_lakehouse.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+          new_cluster:
+            spark_version: "16.2.x-scala2.12"
+            node_type_id: "Standard_D4ds_v5"
+            num_workers: 0
+            spark_conf:
+              "spark.master": "local[*, 4]"
+              "spark.databricks.cluster.profile": "singleNode"
+            custom_tags:
+              "ResourceClass": "SingleNode"
+
+        - task_key: "02_setup_lakebase"
+          description: "Create Lakebase project, database, schema, and populate tables"
+          depends_on:
+            - task_key: "01_setup_lakehouse"
+          notebook_task:
+            notebook_path: ../src/notebooks/02_setup_lakebase.py
+            base_parameters:
+              lakebase_project: ${var.lakebase_project}
+              lakebase_db: ${var.lakebase_db}
+          new_cluster:
+            spark_version: "16.2.x-scala2.12"
+            node_type_id: "Standard_D4ds_v5"
+            num_workers: 0
+            spark_conf:
+              "spark.master": "local[*, 4]"
+              "spark.databricks.cluster.profile": "singleNode"
+            custom_tags:
+              "ResourceClass": "SingleNode"
+
+        - task_key: "03_configure_app"
+          description: "Create Lakebase role for app SP, grant access, and configure app env vars"
+          depends_on:
+            - task_key: "02_setup_lakebase"
+          notebook_task:
+            notebook_path: ../src/notebooks/03_grant_app_access.py
+            base_parameters:
+              catalog: ${var.catalog}
+              schema: ${var.schema}
+              lakebase_project: ${var.lakebase_project}
+              lakebase_db: ${var.lakebase_db}
+              app_name: ${resources.apps.insurance_app.name}
+          new_cluster:
+            spark_version: "16.2.x-scala2.12"
+            node_type_id: "Standard_D4ds_v5"
+            num_workers: 0
+            spark_conf:
+              "spark.master": "local[*, 4]"
+              "spark.databricks.cluster.profile": "singleNode"
+            custom_tags:
+              "ResourceClass": "SingleNode"
