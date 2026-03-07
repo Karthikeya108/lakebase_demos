@@ -381,10 +381,277 @@ async def update_record(request: Request, req: UpdateRequest, source: str = Quer
     return UpdateResponse(success=True, elapsed_ms=round(elapsed, 2), source=source)
 
 
+# --- Branching Demo ---
+
+LAKEBASE_PROJECT = LAKEBASE_ENDPOINT.split("/")[1]  # e.g. "tko-2026-demo"
+BRANCH_ID = "dev-demo"
+BRANCH_NAME = f"projects/{LAKEBASE_PROJECT}/branches/{BRANCH_ID}"
+
+# Mutable branch connection state (discovered dynamically)
+_branch_state: dict[str, Any] = {"host": None, "endpoint": None}
+
+
+def _get_branch_pg_connection():
+    """Connect to the dev branch endpoint via psycopg."""
+    import psycopg
+
+    if not _branch_state["endpoint"]:
+        raise HTTPException(400, "No active database branch. Create one first.")
+
+    cred = w.postgres.generate_database_credential(endpoint=_branch_state["endpoint"])
+    me = w.current_user.me()
+    username = me.user_name or me.display_name
+    host = _branch_state["host"]
+    try:
+        ip = socket.gethostbyname(host)
+    except Exception:
+        ip = host
+    return psycopg.connect(
+        host=host, hostaddr=ip, dbname=LAKEBASE_DB,
+        user=username, password=cred.token, sslmode="require",
+    )
+
+
+def _query_branch(sql: str) -> tuple[list[str], list[dict]]:
+    conn = _get_branch_pg_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            columns = [desc[0] for desc in cur.description]
+            rows = []
+            for raw in cur.fetchall():
+                row = {}
+                for i, col in enumerate(columns):
+                    val = raw[i]
+                    if isinstance(val, Decimal):
+                        val = float(val)
+                    if hasattr(val, "isoformat"):
+                        val = val.isoformat()
+                    row[col] = val
+                rows.append(row)
+            return columns, rows
+    finally:
+        conn.close()
+
+
+def _execute_branch(sql: str, params: tuple | None = None) -> int:
+    conn = _get_branch_pg_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            conn.commit()
+            return cur.rowcount
+    finally:
+        conn.close()
+
+
+def _discover_branch() -> bool:
+    """Check if the dev-demo branch exists and discover its endpoint. Returns True if active."""
+    if _branch_state["endpoint"]:
+        return True
+    try:
+        w.postgres.get_branch(name=BRANCH_NAME)
+    except Exception:
+        return False
+    # Branch exists, discover endpoint
+    endpoints = list(w.postgres.list_endpoints(parent=BRANCH_NAME))
+    if endpoints and endpoints[0].status and endpoints[0].status.hosts:
+        _branch_state["host"] = endpoints[0].status.hosts.host
+        _branch_state["endpoint"] = endpoints[0].name
+        return True
+    return False
+
+
+@app.get("/api/branch/status")
+async def branch_status():
+    active = _discover_branch()
+    return {"active": active, "branch": BRANCH_ID}
+
+
+def _create_branch_with_endpoint():
+    """Create the branch and its compute endpoint. Returns the endpoint."""
+    from databricks.sdk.service.postgres import Branch, BranchSpec, Endpoint, EndpointSpec, EndpointType
+
+    # Create branch
+    w.postgres.create_branch(
+        parent=f"projects/{LAKEBASE_PROJECT}",
+        branch=Branch(
+            spec=BranchSpec(
+                source_branch=f"projects/{LAKEBASE_PROJECT}/branches/production",
+                no_expiry=True,
+            )
+        ),
+        branch_id=BRANCH_ID,
+    ).wait()
+
+    # Create compute endpoint on the branch
+    w.postgres.create_endpoint(
+        parent=BRANCH_NAME,
+        endpoint=Endpoint(
+            spec=EndpointSpec(
+                endpoint_type=EndpointType.ENDPOINT_TYPE_READ_WRITE,
+                autoscaling_limit_min_cu=1.0,
+                autoscaling_limit_max_cu=1.0,
+            )
+        ),
+        endpoint_id="primary",
+    ).wait()
+
+    # Discover the endpoint host
+    ep = w.postgres.get_endpoint(name=f"{BRANCH_NAME}/endpoints/primary")
+    _branch_state["host"] = ep.status.hosts.host
+    _branch_state["endpoint"] = ep.name
+
+
+@app.post("/api/branch/create")
+async def create_branch():
+    """Create the dev-demo database branch from production."""
+    if _discover_branch():
+        return {"status": "exists", "branch": BRANCH_ID, "message": "Database branch already exists"}
+
+    start = time.time()
+    _create_branch_with_endpoint()
+    elapsed = (time.time() - start) * 1000
+
+    return {
+        "status": "created",
+        "branch": BRANCH_ID,
+        "elapsed_ms": round(elapsed, 2),
+        "message": f"Database branch created in {elapsed/1000:.1f}s",
+    }
+
+
+@app.get("/api/branch/compare")
+async def compare_branches(
+    table: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+):
+    if table not in TABLES:
+        raise HTTPException(404, f"Table '{table}' not found")
+    if not _discover_branch():
+        raise HTTPException(400, "No active database branch")
+
+    pk = PK_MAP[table]
+    offset = (page - 1) * page_size
+    schema_table = f"{LAKEBASE_SCHEMA}.{table}"
+    count_sql = f"SELECT COUNT(*) AS cnt FROM {schema_table}"
+    data_sql = f"SELECT * FROM {schema_table} ORDER BY {pk} LIMIT {page_size} OFFSET {offset}"
+
+    # Query production via psycopg
+    start = time.time()
+    _, prod_count = query_lakebase(count_sql)
+    prod_cols, prod_rows = query_lakebase(data_sql)
+    prod_ms = (time.time() - start) * 1000
+
+    # Query branch via psycopg
+    start = time.time()
+    _, branch_count = _query_branch(count_sql)
+    branch_cols, branch_rows = _query_branch(data_sql)
+    branch_ms = (time.time() - start) * 1000
+
+    return {
+        "table": table,
+        "pk": pk,
+        "page": page,
+        "page_size": page_size,
+        "production": {
+            "columns": prod_cols,
+            "rows": prod_rows,
+            "total_count": prod_count[0]["cnt"],
+            "elapsed_ms": round(prod_ms, 2),
+        },
+        "branch": {
+            "columns": branch_cols,
+            "rows": branch_rows,
+            "total_count": branch_count[0]["cnt"],
+            "elapsed_ms": round(branch_ms, 2),
+        },
+    }
+
+
+class BranchActionRequest(BaseModel):
+    action: str  # "premium_increase", "delete_cancelled", "add_agent"
+    table: str = "premiums"
+
+
+@app.post("/api/branch/action")
+async def branch_action(req: BranchActionRequest):
+    if not _discover_branch():
+        raise HTTPException(400, "No active database branch")
+    start = time.time()
+
+    if req.action == "premium_increase":
+        affected = _execute_branch(
+            f"UPDATE {LAKEBASE_SCHEMA}.premiums SET amount = ROUND(amount * 1.10, 2)"
+        )
+        message = f"Increased all premiums by 10% ({affected} rows updated)"
+
+    elif req.action == "delete_cancelled":
+        affected = _execute_branch(
+            f"DELETE FROM {LAKEBASE_SCHEMA}.policies WHERE status = 'CANCELLED'"
+        )
+        message = f"Deleted all cancelled policies ({affected} rows removed)"
+
+    elif req.action == "add_agent":
+        cols, rows = _query_branch(f"SELECT MAX(agent_id) AS max_id FROM {LAKEBASE_SCHEMA}.agents")
+        next_id = (rows[0]["max_id"] or 0) + 1
+        _execute_branch(
+            f"INSERT INTO {LAKEBASE_SCHEMA}.agents (agent_id, first_name, last_name, email, phone, license_number, hire_date, region, is_active) "
+            f"VALUES (%s, 'Demo', 'Agent', 'demo.agent@insurance.com', '555-0000', 'LIC-DEMO-001', CURRENT_DATE, 'Central', true)",
+            (next_id,),
+        )
+        affected = 1
+        message = f"Added new agent 'Demo Agent' (ID: {next_id})"
+
+    else:
+        raise HTTPException(400, f"Unknown action: {req.action}")
+
+    elapsed = (time.time() - start) * 1000
+    return {"success": True, "message": message, "affected_rows": affected, "elapsed_ms": round(elapsed, 2)}
+
+
+@app.post("/api/branch/reset")
+async def reset_branch():
+    """Delete and recreate the dev branch from production to reset all data."""
+    start = time.time()
+
+    # Clear state
+    _branch_state["host"] = None
+    _branch_state["endpoint"] = None
+
+    # Delete existing branch
+    try:
+        w.postgres.delete_branch(name=BRANCH_NAME).wait()
+    except Exception as e:
+        if "NOT_FOUND" not in str(e):
+            raise HTTPException(500, f"Failed to delete branch: {e}")
+
+    # Recreate branch + endpoint
+    _create_branch_with_endpoint()
+
+    elapsed = (time.time() - start) * 1000
+    return {
+        "success": True,
+        "elapsed_ms": round(elapsed, 2),
+        "message": f"Database branch reset from production in {elapsed/1000:.1f}s",
+    }
+
+
 # Serve static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 @app.get("/")
-async def index():
+async def home():
+    return FileResponse("static/home.html")
+
+
+@app.get("/dbsql-vs-lakebase")
+async def dbsql_vs_lakebase():
     return FileResponse("static/index.html")
+
+
+@app.get("/branching")
+async def branching():
+    return FileResponse("static/branching.html")

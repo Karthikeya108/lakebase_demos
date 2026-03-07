@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Lakebase Autoscaling Demos</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 min-h-screen">
+  <div class="max-w-5xl mx-auto px-4 py-12">
+    <!-- Header -->
+    <div class="text-center mb-12">
+      <h1 class="text-4xl font-bold text-gray-900">Lakebase Autoscaling Demos</h1>
+      <p class="text-lg text-gray-500 mt-3">Explore Databricks Lakebase capabilities through interactive demos</p>
+    </div>
+
+    <!-- Demo Cards -->
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+
+      <!-- DBSQL vs Lakebase -->
+      <a href="/dbsql-vs-lakebase"
+        class="group bg-white rounded-xl shadow-md hover:shadow-xl border border-gray-200 hover:border-green-400 transition-all p-6 flex flex-col">
+        <div class="flex items-center gap-3 mb-4">
+          <div class="w-10 h-10 rounded-lg bg-green-100 flex items-center justify-center">
+            <svg class="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+            </svg>
+          </div>
+          <h2 class="text-lg font-semibold text-gray-900 group-hover:text-green-600 transition-colors">DBSQL vs Lakebase</h2>
+        </div>
+        <p class="text-sm text-gray-500 flex-1">Compare performance across 4 data access methods: DBSQL Statement API, DBSQL Connector, Lakebase Postgres, and Lakebase Data API. Browse and edit 570K+ insurance records.</p>
+        <div class="mt-4 flex items-center text-sm font-medium text-green-600 group-hover:text-green-700">
+          Launch demo
+          <svg class="w-4 h-4 ml-1 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+          </svg>
+        </div>
+      </a>
+
+      <!-- Branching Workflows -->
+      <a href="/branching"
+        class="group bg-white rounded-xl shadow-md hover:shadow-xl border border-gray-200 hover:border-green-400 transition-all p-6 flex flex-col">
+        <div class="flex items-center gap-3 mb-4">
+          <div class="w-10 h-10 rounded-lg bg-green-100 flex items-center justify-center">
+            <svg class="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2 1 3 3 3h10c2 0 3-1 3-3V7c0-2-1-3-3-3H7C5 4 4 5 4 7z"/>
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6M12 9v6"/>
+            </svg>
+          </div>
+          <h2 class="text-lg font-semibold text-gray-900 group-hover:text-green-600 transition-colors">Branching Workflows</h2>
+        </div>
+        <p class="text-sm text-gray-500 flex-1">Create isolated dev branches from production, make bulk changes, and compare side by side. Git-like branching with copy-on-write storage.</p>
+        <div class="mt-4 flex items-center text-sm font-medium text-green-600 group-hover:text-green-700">
+          Launch demo
+          <svg class="w-4 h-4 ml-1 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+          </svg>
+        </div>
+      </a>
+
+      <!-- Coming Soon 2 -->
+      <div class="bg-white rounded-xl shadow-md border border-gray-100 p-6 flex flex-col opacity-60">
+        <div class="flex items-center gap-3 mb-4">
+          <div class="w-10 h-10 rounded-lg bg-gray-100 flex items-center justify-center">
+            <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+            </svg>
+          </div>
+          <h2 class="text-lg font-semibold text-gray-400">Reverse ETL</h2>
+        </div>
+        <p class="text-sm text-gray-400 flex-1">Sync data from Delta Lake tables to Lakebase Postgres via synced tables for operational workloads.</p>
+        <div class="mt-4 text-sm font-medium text-gray-400">Coming Soon!</div>
+      </div>
+
+      <!-- Coming Soon 3 -->
+      <div class="bg-white rounded-xl shadow-md border border-gray-100 p-6 flex flex-col opacity-60">
+        <div class="flex items-center gap-3 mb-4">
+          <div class="w-10 h-10 rounded-lg bg-gray-100 flex items-center justify-center">
+            <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+            </svg>
+          </div>
+          <h2 class="text-lg font-semibold text-gray-400">Scale-to-Zero</h2>
+        </div>
+        <p class="text-sm text-gray-400 flex-1">Demonstrate autoscaling compute and scale-to-zero cost savings with configurable inactivity timeouts.</p>
+        <div class="mt-4 text-sm font-medium text-gray-400">Coming Soon!</div>
+      </div>
+
+      <!-- Coming Soon 4 -->
+      <div class="bg-white rounded-xl shadow-md border border-gray-100 p-6 flex flex-col opacity-60">
+        <div class="flex items-center gap-3 mb-4">
+          <div class="w-10 h-10 rounded-lg bg-gray-100 flex items-center justify-center">
+            <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+            </svg>
+          </div>
+          <h2 class="text-lg font-semibold text-gray-400">Row-Level Security</h2>
+        </div>
+        <p class="text-sm text-gray-400 flex-1">Implement fine-grained access control with PostgreSQL RLS policies via the Data API.</p>
+        <div class="mt-4 text-sm font-medium text-gray-400">Coming Soon!</div>
+      </div>
+
+      <!-- Coming Soon 5 -->
+      <div class="bg-white rounded-xl shadow-md border border-gray-100 p-6 flex flex-col opacity-60">
+        <div class="flex items-center gap-3 mb-4">
+          <div class="w-10 h-10 rounded-lg bg-gray-100 flex items-center justify-center">
+            <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+          </div>
+          <h2 class="text-lg font-semibold text-gray-400">Point-in-Time Restore</h2>
+        </div>
+        <p class="text-sm text-gray-400 flex-1">Instant point-in-time restore from any moment within a configurable retention window.</p>
+        <div class="mt-4 text-sm font-medium text-gray-400">Coming Soon!</div>
+      </div>
+
+    </div>
+  </div>
+</body>
+</html>
