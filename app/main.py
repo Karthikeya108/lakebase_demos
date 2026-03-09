@@ -1160,6 +1160,422 @@ async def rls_query(
     }
 
 
+# --- Point-in-Time Restore Demo ---
+
+PITR_TABLE = "agents"
+PITR_SCHEMA_TABLE = f"{LAKEBASE_SCHEMA}.{PITR_TABLE}"
+PITR_PK = "agent_id"
+PITR_BRANCH_ID = "restored"
+PITR_BRANCH_NAME = f"projects/{LAKEBASE_PROJECT}/branches/{PITR_BRANCH_ID}"
+
+_pitr_state: dict[str, Any] = {
+    "checkpoint_ts": None,       # Postgres timestamp string before disaster
+    "disaster_done": False,      # Whether destructive action has been applied
+    "disaster_detail": None,     # Description of what was deleted
+    "deleted_rows": [],          # Rows deleted (for cleanup re-insert)
+    "restored_branch": False,    # Whether restored branch exists
+    "restored_host": None,
+    "restored_endpoint": None,
+}
+
+
+def _get_pitr_branch_connection():
+    """Connect to the restored branch endpoint via psycopg."""
+    import psycopg
+
+    if not _pitr_state["restored_endpoint"]:
+        raise HTTPException(400, "No restored branch. Run restore first.")
+
+    cred = w.postgres.generate_database_credential(endpoint=_pitr_state["restored_endpoint"])
+    me = w.current_user.me()
+    username = me.user_name or me.display_name
+    host = _pitr_state["restored_host"]
+    try:
+        ip = socket.gethostbyname(host)
+    except Exception:
+        ip = host
+    return psycopg.connect(
+        host=host, hostaddr=ip, dbname=LAKEBASE_DB,
+        user=username, password=cred.token, sslmode="require",
+    )
+
+
+def _query_pitr_branch(sql: str) -> tuple[list[str], list[dict]]:
+    conn = _get_pitr_branch_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            columns = [desc[0] for desc in cur.description]
+            rows = []
+            for raw in cur.fetchall():
+                row = {}
+                for i, col in enumerate(columns):
+                    val = raw[i]
+                    if isinstance(val, Decimal):
+                        val = float(val)
+                    if hasattr(val, "isoformat"):
+                        val = val.isoformat()
+                    row[col] = val
+                rows.append(row)
+            return columns, rows
+    finally:
+        conn.close()
+
+
+def _discover_pitr_branch() -> bool:
+    """Check if the restored branch exists and discover its endpoint."""
+    if _pitr_state["restored_endpoint"]:
+        return True
+    try:
+        w.postgres.get_branch(name=PITR_BRANCH_NAME)
+    except Exception:
+        return False
+    endpoints = list(w.postgres.list_endpoints(parent=PITR_BRANCH_NAME))
+    if endpoints and endpoints[0].status and endpoints[0].status.hosts:
+        _pitr_state["restored_host"] = endpoints[0].status.hosts.host
+        _pitr_state["restored_endpoint"] = endpoints[0].name
+        _pitr_state["restored_branch"] = True
+        return True
+    return False
+
+
+@app.get("/api/pitr/status")
+async def pitr_status():
+    """Get current PITR demo state."""
+    # Get current row count from production
+    prod_count = 0
+    try:
+        _, rows = query_lakebase(f"SELECT COUNT(*) AS cnt FROM {PITR_SCHEMA_TABLE}")
+        prod_count = rows[0]["cnt"]
+    except Exception:
+        pass
+
+    restored_count = 0
+    has_branch = _discover_pitr_branch()
+    if has_branch:
+        try:
+            _, rows = _query_pitr_branch(f"SELECT COUNT(*) AS cnt FROM {PITR_SCHEMA_TABLE}")
+            restored_count = rows[0]["cnt"]
+        except Exception:
+            pass
+
+    return {
+        "checkpoint_ts": _pitr_state["checkpoint_ts"],
+        "disaster_done": _pitr_state["disaster_done"],
+        "disaster_detail": _pitr_state["disaster_detail"],
+        "restored_branch": has_branch,
+        "recovered": _pitr_state.get("recovered", False),
+        "prod_count": prod_count,
+        "restored_count": restored_count,
+        "table": PITR_TABLE,
+    }
+
+
+@app.post("/api/pitr/disaster")
+async def pitr_disaster(region: str = Query("Northeast")):
+    """Simulate a disaster: capture timestamp, then corrupt agent data by NULLing email and phone."""
+    if _pitr_state["disaster_done"]:
+        raise HTTPException(400, "Disaster already applied. Clean up or restore first.")
+
+    start = time.time()
+
+    # Automatically capture restore point BEFORE the corruption
+    _, ts_rows = query_lakebase("SELECT NOW()::text AS ts")
+    _pitr_state["checkpoint_ts"] = ts_rows[0]["ts"]
+
+    # Save original values for cleanup
+    _, originals = query_lakebase(
+        f"SELECT agent_id, email, phone FROM {PITR_SCHEMA_TABLE} WHERE LOWER(region) = LOWER('{region}')"
+    )
+    _pitr_state["deleted_rows"] = originals
+    _pitr_state["disaster_region"] = region
+
+    # Corrupt: NULL out email and phone
+    affected = execute_lakebase(
+        f"UPDATE {PITR_SCHEMA_TABLE} SET email = NULL, phone = NULL WHERE LOWER(region) = LOWER('{region}')"
+    )
+
+    _pitr_state["disaster_done"] = True
+    _pitr_state["disaster_detail"] = f"Corrupted {affected} agents in {region} (email & phone set to NULL)"
+
+    elapsed = (time.time() - start) * 1000
+
+    return {
+        "success": True,
+        "affected": affected,
+        "region": region,
+        "checkpoint_ts": _pitr_state["checkpoint_ts"],
+        "elapsed_ms": round(elapsed, 2),
+        "message": f"Corrupted {affected} agents in {region} — email & phone wiped to NULL",
+    }
+
+
+@app.post("/api/pitr/restore")
+async def pitr_restore():
+    """Create a branch from the checkpoint timestamp to recover deleted data."""
+    from databricks.sdk.service.postgres import Branch, BranchSpec, Endpoint, EndpointSpec, EndpointType
+    from google.protobuf.timestamp_pb2 import Timestamp
+    import datetime
+
+    if not _pitr_state["disaster_done"] or not _pitr_state["checkpoint_ts"]:
+        raise HTTPException(400, "No disaster to recover from. Simulate a disaster first.")
+
+    # If branch already exists, clean it up first
+    if _discover_pitr_branch():
+        _pitr_state["restored_host"] = None
+        _pitr_state["restored_endpoint"] = None
+        _pitr_state["restored_branch"] = False
+        try:
+            w.postgres.delete_branch(name=PITR_BRANCH_NAME).wait()
+        except Exception:
+            pass
+
+    start = time.time()
+
+    # Parse the checkpoint timestamp and go back 30 minutes
+    ts_str = _pitr_state["checkpoint_ts"]
+    # Postgres NOW() returns e.g. "2026-03-09 14:30:00.123456+00"
+    dt = datetime.datetime.fromisoformat(ts_str.replace("+00", "+00:00"))
+    dt = dt - datetime.timedelta(minutes=5)
+    _pitr_state["restore_ts"] = dt.isoformat()
+    pb_ts = Timestamp()
+    pb_ts.FromDatetime(dt)
+
+    # Create branch from production at 5 minutes before the disaster
+    w.postgres.create_branch(
+        parent=f"projects/{LAKEBASE_PROJECT}",
+        branch=Branch(
+            spec=BranchSpec(
+                source_branch=f"projects/{LAKEBASE_PROJECT}/branches/production",
+                source_branch_time=pb_ts,
+                no_expiry=True,
+            )
+        ),
+        branch_id=PITR_BRANCH_ID,
+    ).wait()
+
+    # Create compute endpoint on the restored branch (skip if auto-created)
+    try:
+        w.postgres.create_endpoint(
+            parent=PITR_BRANCH_NAME,
+            endpoint=Endpoint(
+                spec=EndpointSpec(
+                    endpoint_type=EndpointType.ENDPOINT_TYPE_READ_WRITE,
+                    autoscaling_limit_min_cu=1.0,
+                    autoscaling_limit_max_cu=1.0,
+                )
+            ),
+            endpoint_id="primary",
+        ).wait()
+    except Exception:
+        pass  # Endpoint may have been auto-created with the branch
+
+    # Discover the endpoint
+    endpoints = list(w.postgres.list_endpoints(parent=PITR_BRANCH_NAME))
+    if not endpoints or not endpoints[0].status or not endpoints[0].status.hosts:
+        raise HTTPException(500, "Restored branch has no endpoint")
+    _pitr_state["restored_host"] = endpoints[0].status.hosts.host
+    _pitr_state["restored_endpoint"] = endpoints[0].name
+    _pitr_state["restored_branch"] = True
+
+    # Get row count from restored branch
+    _, count_rows = _query_pitr_branch(f"SELECT COUNT(*) AS cnt FROM {PITR_SCHEMA_TABLE}")
+
+    elapsed = (time.time() - start) * 1000
+    restore_ts = _pitr_state["restore_ts"]
+    return {
+        "success": True,
+        "elapsed_ms": round(elapsed, 2),
+        "restored_count": count_rows[0]["cnt"],
+        "checkpoint_ts": ts_str,
+        "restore_ts": restore_ts,
+        "message": f"Restored from 5 min before disaster ({restore_ts}) in {elapsed/1000:.1f}s — {count_rows[0]['cnt']} agents recovered",
+    }
+
+
+@app.get("/api/pitr/compare")
+async def pitr_compare(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(15, ge=1, le=100),
+):
+    """Compare production (damaged) vs restored branch side by side."""
+    offset = (page - 1) * page_size
+    count_sql = f"SELECT COUNT(*) AS cnt FROM {PITR_SCHEMA_TABLE}"
+    data_sql = f"SELECT * FROM {PITR_SCHEMA_TABLE} ORDER BY {PITR_PK} LIMIT {page_size} OFFSET {offset}"
+
+    # Production
+    start = time.time()
+    _, prod_count = query_lakebase(count_sql)
+    prod_cols, prod_rows = query_lakebase(data_sql)
+    prod_ms = (time.time() - start) * 1000
+
+    # Restored branch
+    restored_cols, restored_rows, restored_total, restored_ms = [], [], 0, 0.0
+    if _discover_pitr_branch():
+        start = time.time()
+        _, res_count = _query_pitr_branch(count_sql)
+        restored_cols, restored_rows = _query_pitr_branch(data_sql)
+        restored_total = res_count[0]["cnt"]
+        restored_ms = (time.time() - start) * 1000
+
+    return {
+        "production": {
+            "columns": prod_cols,
+            "rows": prod_rows,
+            "total_count": prod_count[0]["cnt"],
+            "elapsed_ms": round(prod_ms, 2),
+        },
+        "restored": {
+            "columns": restored_cols,
+            "rows": restored_rows,
+            "total_count": restored_total,
+            "elapsed_ms": round(restored_ms, 2),
+        },
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@app.post("/api/pitr/recover")
+async def pitr_recover():
+    """Copy intact data from restored branch back to production to fix corruption."""
+    if not _discover_pitr_branch():
+        raise HTTPException(400, "No restored branch. Run restore first.")
+
+    region = _pitr_state.get("disaster_region")
+    if not region:
+        raise HTTPException(400, "No disaster region recorded.")
+
+    start = time.time()
+
+    # Read intact rows from the restored branch for the affected region
+    _, intact_rows = _query_pitr_branch(
+        f"SELECT agent_id, email, phone FROM {PITR_SCHEMA_TABLE} WHERE LOWER(region) = LOWER('{region}')"
+    )
+
+    # Update production with the intact values
+    conn = _get_pg_connection()
+    updated = 0
+    try:
+        with conn.cursor() as cur:
+            for row in intact_rows:
+                cur.execute(
+                    f"UPDATE {PITR_SCHEMA_TABLE} SET email = %s, phone = %s WHERE {PITR_PK} = %s",
+                    (row["email"], row["phone"], row["agent_id"]),
+                )
+                updated += 1
+            conn.commit()
+    finally:
+        conn.close()
+
+    _pitr_state["recovered"] = True
+    elapsed = (time.time() - start) * 1000
+    return {
+        "success": True,
+        "updated": updated,
+        "elapsed_ms": round(elapsed, 2),
+        "message": f"Recovered {updated} agents in {region} — email & phone restored from backup branch",
+    }
+
+
+@app.post("/api/pitr/cleanup")
+async def pitr_cleanup():
+    """Clean up: restore production if needed and delete the restored branch."""
+    start = time.time()
+    messages = []
+
+    # Restore original email/phone values in production (skip if already recovered)
+    if _pitr_state["deleted_rows"] and not _pitr_state.get("recovered"):
+        conn = _get_pg_connection()
+        try:
+            with conn.cursor() as cur:
+                for row in _pitr_state["deleted_rows"]:
+                    cur.execute(
+                        f"UPDATE {PITR_SCHEMA_TABLE} SET email = %s, phone = %s WHERE {PITR_PK} = %s",
+                        (row["email"], row["phone"], row["agent_id"]),
+                    )
+                conn.commit()
+            messages.append(f"Restored email & phone for {len(_pitr_state['deleted_rows'])} agents in production")
+        finally:
+            conn.close()
+
+    # Delete the restored branch
+    if _pitr_state["restored_endpoint"] or _discover_pitr_branch():
+        try:
+            w.postgres.delete_branch(name=PITR_BRANCH_NAME).wait()
+            messages.append("Deleted restored branch")
+        except Exception as e:
+            if "NOT_FOUND" not in str(e):
+                messages.append(f"Warning: could not delete branch: {e}")
+
+    # Reset state
+    _pitr_state["checkpoint_ts"] = None
+    _pitr_state["disaster_done"] = False
+    _pitr_state["disaster_detail"] = None
+    _pitr_state["disaster_region"] = None
+    _pitr_state["deleted_rows"] = []
+    _pitr_state["recovered"] = False
+    _pitr_state["restored_branch"] = False
+    _pitr_state["restored_host"] = None
+    _pitr_state["restored_endpoint"] = None
+
+    elapsed = (time.time() - start) * 1000
+    return {
+        "success": True,
+        "elapsed_ms": round(elapsed, 2),
+        "message": "; ".join(messages) if messages else "Nothing to clean up",
+    }
+
+
+@app.post("/api/pitr/reset")
+async def pitr_reset():
+    """Force-reset the PITR demo: restore production data, delete branch, clear state. Always works."""
+    start = time.time()
+    messages = []
+
+    # Restore original email/phone values in production (skip if already recovered)
+    if _pitr_state["deleted_rows"] and not _pitr_state.get("recovered"):
+        try:
+            conn = _get_pg_connection()
+            with conn.cursor() as cur:
+                for row in _pitr_state["deleted_rows"]:
+                    cur.execute(
+                        f"UPDATE {PITR_SCHEMA_TABLE} SET email = %s, phone = %s WHERE {PITR_PK} = %s",
+                        (row["email"], row["phone"], row["agent_id"]),
+                    )
+                conn.commit()
+            conn.close()
+            messages.append(f"Restored {len(_pitr_state['deleted_rows'])} agents")
+        except Exception as e:
+            messages.append(f"Warning: could not restore data: {e}")
+
+    # Delete the restored branch if it exists
+    try:
+        w.postgres.get_branch(name=PITR_BRANCH_NAME)
+        w.postgres.delete_branch(name=PITR_BRANCH_NAME).wait()
+        messages.append("Deleted restored branch")
+    except Exception:
+        pass
+
+    # Reset all state
+    _pitr_state["checkpoint_ts"] = None
+    _pitr_state["disaster_done"] = False
+    _pitr_state["disaster_detail"] = None
+    _pitr_state["disaster_region"] = None
+    _pitr_state["deleted_rows"] = []
+    _pitr_state["recovered"] = False
+    _pitr_state["restored_branch"] = False
+    _pitr_state["restored_host"] = None
+    _pitr_state["restored_endpoint"] = None
+
+    elapsed = (time.time() - start) * 1000
+    return {
+        "success": True,
+        "elapsed_ms": round(elapsed, 2),
+        "message": "; ".join(messages) if messages else "Reset complete",
+    }
+
+
 # Serve static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -1192,3 +1608,8 @@ async def scale_to_zero():
 @app.get("/row-level-security")
 async def row_level_security():
     return FileResponse("static/row-level-security.html")
+
+
+@app.get("/point-in-time-restore")
+async def point_in_time_restore():
+    return FileResponse("static/point-in-time-restore.html")

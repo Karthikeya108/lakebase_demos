@@ -72,9 +72,25 @@ CREATE POLICY region_filter ON agents USING (LOWER(region) = REPLACE(current_use
 ```
 The app runs `SET ROLE rls_<region>` before each query. The SQL is always `SELECT * FROM agents` — Postgres handles the filtering.
 
-### Coming Soon
+### 6. Point-in-Time Restore
 
-- Point-in-Time Restore (instant recovery)
+Simulate a disaster, then recover data by branching from a past timestamp — proving data is never lost within the retention window:
+
+- **4-step guided flow**: Simulate Disaster → Restore from Past → Recover Production → Clean Up
+- **Disaster simulation**: Corrupts agent data in a selected region (sets email & phone to NULL via bulk UPDATE)
+- **Restore from past**: Creates a branch from 5 minutes before the disaster using `source_branch_time` — no pre-planned checkpoints needed, Lakebase retains history automatically (up to 35 days)
+- **Side-by-side comparison**: Corrupted production vs intact restored branch, with NULL cells highlighted in red
+- **Recover production**: Copies intact data from the restored branch back to production, verifying the fix with a green "Recovered" view
+- **Clean up**: Deletes the restored branch and resets the demo
+- **Reset button**: Always available to force-reset regardless of current step
+
+Uses the Databricks SDK with protobuf `Timestamp` to specify the exact point-in-time for branch creation:
+```python
+from google.protobuf.timestamp_pb2 import Timestamp
+pb_ts = Timestamp()
+pb_ts.FromDatetime(dt)
+w.postgres.create_branch(..., spec=BranchSpec(source_branch_time=pb_ts, ...))
+```
 
 ## Architecture
 
@@ -84,6 +100,7 @@ The app runs `SET ROLE rls_<region>` before each query. The SQL is always `SELEC
 - **Reverse ETL**: Manual Delta-to-Postgres sync via DBSQL Statement API + psycopg3
 - **Scale-to-Zero**: Compute lifecycle management via `w.postgres.update_endpoint()` with protobuf Duration
 - **Row-Level Security**: PostgreSQL RLS policies with `SET ROLE` persona switching
+- **Point-in-Time Restore**: Branch from any past timestamp via `source_branch_time` with protobuf Timestamp
 - **App**: FastAPI + Tailwind CSS served as a Databricks App
 
 ## Data Model
@@ -123,7 +140,8 @@ tko_2026/
 │       ├── branching.html            # Branching workflow demo
 │       ├── reverse-etl.html          # Reverse ETL demo
 │       ├── scale-to-zero.html        # Scale-to-Zero demo
-│       └── row-level-security.html   # Row-Level Security demo
+│       ├── row-level-security.html   # Row-Level Security demo
+│       └── point-in-time-restore.html # Point-in-Time Restore demo
 └── populate_lakebase.py              # Standalone script for manual Lakebase population
 ```
 

@@ -118,19 +118,25 @@
         </div>
       </a>
 
-      <!-- Coming Soon 5 -->
-      <div class="bg-white rounded-xl shadow-md border border-gray-100 p-6 flex flex-col opacity-60">
+      <!-- Point-in-Time Restore -->
+      <a href="/point-in-time-restore"
+        class="group bg-white rounded-xl shadow-md hover:shadow-xl border border-gray-200 hover:border-green-400 transition-all p-6 flex flex-col">
         <div class="flex items-center gap-3 mb-4">
-          <div class="w-10 h-10 rounded-lg bg-gray-100 flex items-center justify-center">
-            <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <div class="w-10 h-10 rounded-lg bg-green-100 flex items-center justify-center">
+            <svg class="w-5 h-5 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
             </svg>
           </div>
-          <h2 class="text-lg font-semibold text-gray-400">Point-in-Time Restore</h2>
+          <h2 class="text-lg font-semibold text-gray-900 group-hover:text-green-600 transition-colors">Point-in-Time Restore</h2>
         </div>
-        <p class="text-sm text-gray-400 flex-1">Instant point-in-time restore from any moment within a configurable retention window.</p>
-        <div class="mt-4 text-sm font-medium text-gray-400">Coming Soon!</div>
-      </div>
+        <p class="text-sm text-gray-500 flex-1">Simulate a disaster, then recover data by branching from a past timestamp. Proves data is never lost within the retention window.</p>
+        <div class="mt-4 flex items-center text-sm font-medium text-green-600 group-hover:text-green-700">
+          Launch demo
+          <svg class="w-4 h-4 ml-1 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+          </svg>
+        </div>
+      </a>
 
     </div>
   </div>
