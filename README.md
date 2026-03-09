@@ -33,11 +33,47 @@ Demonstrate Lakebase's Git-like database branching with copy-on-write storage:
 
 The branch and its compute endpoint are created/discovered dynamically via the SDK. No hardcoded endpoint names.
 
+### 3. Reverse ETL
+
+Push data from Delta Lake to Lakebase Postgres and compare side by side:
+
+- **Sync**: Reads rows from a Delta table (`regional_summary`) via the DBSQL Statement API and writes them to Lakebase Postgres via psycopg3 with `ON CONFLICT DO NOTHING`
+- **Add rows**: Insert new rows into the Delta source table, then sync again to see them appear in Lakebase
+- **Side-by-side comparison**: View Delta (source) and Lakebase (destination) row counts and data together
+- **Pagination**: 25 records per page with full navigation
+
+Uses a manual copy approach (DBSQL read + psycopg write) rather than synced tables, which are not yet supported on Azure.
+
+### 4. Scale-to-Zero
+
+Configure inactivity timeouts, observe compute suspend and wake-up, and compare warm vs cold-start latencies:
+
+- **Endpoint status**: Real-time display of compute state (IDLE, SUSPENDED) with auto-refresh every 5 seconds
+- **Timeout configuration**: One-click buttons for 5m, 10m, 30m, 1h, and "Never" suspend timeout settings
+- **Test query**: Run `SELECT COUNT(*) FROM agents` and see response time
+- **Cold-start breakdown**: When compute is suspended, the first query wakes it up. The demo runs a second warm query to calculate the wake-up overhead vs actual query time, displayed as a stacked bar chart
+- **Latency history**: Bar chart tracking all queries with cold (red) vs warm (green) visual distinction
+
+Uses the Databricks SDK (`w.postgres.update_endpoint()`) to configure suspend timeout with protobuf `Duration` objects.
+
+### 5. Row-Level Security
+
+Switch between regional manager personas and see how PostgreSQL RLS policies filter rows — same SQL query, different results:
+
+- **8 regional personas**: Central, Midwest, Northeast, Northwest, South, Southeast, Southwest, West
+- **Admin bypass**: Admin view always shows all rows (uses an explicit `USING (true)` policy for the service principal)
+- **Side-by-side comparison**: Admin view on the left, persona-filtered view on the right
+- **Connection info**: Shows the Postgres role, `current_user`, and the `SET ROLE` command being executed
+- **Region highlighting**: The `region` column is visually highlighted to show which rows pass the RLS filter
+
+Each persona maps to a Postgres role (`rls_northeast`, `rls_west`, etc.) with an RLS policy:
+```sql
+CREATE POLICY region_filter ON agents USING (LOWER(region) = REPLACE(current_user, 'rls_', ''))
+```
+The app runs `SET ROLE rls_<region>` before each query. The SQL is always `SELECT * FROM agents` — Postgres handles the filtering.
+
 ### Coming Soon
 
-- Reverse ETL (synced tables from Delta Lake)
-- Scale-to-Zero (autoscaling cost savings)
-- Row-Level Security (PostgreSQL RLS via Data API)
 - Point-in-Time Restore (instant recovery)
 
 ## Architecture
@@ -45,6 +81,9 @@ The branch and its compute endpoint are created/discovered dynamically via the S
 - **Lakehouse**: Delta tables in Unity Catalog, queried via a Photon-enabled SQL warehouse
 - **Lakebase**: PostgreSQL 17 tables in Lakebase Autoscaling, queried via psycopg3 or the Data API
 - **Branching**: Copy-on-write database branches with isolated compute endpoints
+- **Reverse ETL**: Manual Delta-to-Postgres sync via DBSQL Statement API + psycopg3
+- **Scale-to-Zero**: Compute lifecycle management via `w.postgres.update_endpoint()` with protobuf Duration
+- **Row-Level Security**: PostgreSQL RLS policies with `SET ROLE` persona switching
 - **App**: FastAPI + Tailwind CSS served as a Databricks App
 
 ## Data Model
@@ -81,7 +120,10 @@ tko_2026/
 │   └── static/
 │       ├── home.html                 # Home page with demo cards
 │       ├── index.html                # DBSQL vs Lakebase demo
-│       └── branching.html            # Branching workflow demo
+│       ├── branching.html            # Branching workflow demo
+│       ├── reverse-etl.html          # Reverse ETL demo
+│       ├── scale-to-zero.html        # Scale-to-Zero demo
+│       └── row-level-security.html   # Row-Level Security demo
 └── populate_lakebase.py              # Standalone script for manual Lakebase population
 ```
 

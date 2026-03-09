@@ -638,6 +638,528 @@ async def reset_branch():
     }
 
 
+# --- Reverse ETL Demo ---
+# Manual copy approach: read from Delta via DBSQL, write to Lakebase via psycopg.
+# Demonstrates the data flow pattern without requiring a UC online catalog.
+
+RETL_TABLE = "analytics_output"
+RETL_FQN = f"{UC_CATALOG}.{UC_SCHEMA}.{RETL_TABLE}"
+RETL_PG_TABLE = f"{LAKEBASE_SCHEMA}.{RETL_TABLE}"
+RETL_PK = "id"
+
+# Track whether the sync target table exists in Lakebase
+_retl_state: dict[str, Any] = {"target_exists": False}
+
+
+def _check_retl_source() -> bool:
+    """Check if the source Delta table exists."""
+    try:
+        query_dbsql(f"DESCRIBE TABLE {RETL_FQN}")
+        return True
+    except Exception:
+        return False
+
+
+def _check_retl_target() -> bool:
+    """Check if the target Lakebase table exists."""
+    try:
+        query_lakebase(f"SELECT 1 FROM {RETL_PG_TABLE} LIMIT 1")
+        _retl_state["target_exists"] = True
+        return True
+    except Exception:
+        _retl_state["target_exists"] = False
+        return False
+
+
+@app.get("/api/retl/status")
+async def retl_status():
+    """Check if source table and target Lakebase table exist."""
+    source_exists = _check_retl_source()
+    target_exists = _check_retl_target()
+
+    # Get row counts
+    src_count = 0
+    tgt_count = 0
+    if source_exists:
+        try:
+            _, rows = query_dbsql(f"SELECT COUNT(*) AS cnt FROM {RETL_FQN}")
+            src_count = rows[0]["cnt"]
+        except Exception:
+            pass
+    if target_exists:
+        try:
+            _, rows = query_lakebase(f"SELECT COUNT(*) AS cnt FROM {RETL_PG_TABLE}")
+            tgt_count = rows[0]["cnt"]
+        except Exception:
+            pass
+
+    return {
+        "source_exists": source_exists,
+        "source_table": RETL_FQN,
+        "source_count": src_count,
+        "synced": target_exists,
+        "target_table": RETL_PG_TABLE,
+        "target_count": tgt_count,
+        "sync_status": {
+            "state": "SYNCED" if target_exists and src_count == tgt_count else
+                     "OUT_OF_SYNC" if target_exists and src_count != tgt_count else
+                     "NOT_CREATED",
+            "message": f"{tgt_count}/{src_count} rows synced" if target_exists else "Target table not created",
+        } if source_exists else None,
+    }
+
+
+@app.post("/api/retl/setup-source")
+async def retl_setup_source():
+    """Create the source Delta table with sample data."""
+    start = time.time()
+
+    query_dbsql(f"""
+        CREATE TABLE IF NOT EXISTS {RETL_FQN} (
+            id BIGINT,
+            report_date DATE,
+            region STRING,
+            total_policies INT,
+            total_premium DECIMAL(12,2),
+            avg_claim_amount DECIMAL(10,2)
+        )
+        TBLPROPERTIES (delta.enableChangeDataFeed = true)
+    """)
+
+    # Check if empty and populate
+    _, rows = query_dbsql(f"SELECT COUNT(*) AS cnt FROM {RETL_FQN}")
+    if rows[0]["cnt"] == 0:
+        query_dbsql(f"""
+            INSERT INTO {RETL_FQN} VALUES
+            (1, '2026-03-01', 'Northeast', 12450, 8234500.00, 3245.50),
+            (2, '2026-03-01', 'Southeast', 9870, 6123400.00, 2987.25),
+            (3, '2026-03-01', 'Midwest', 11200, 7456700.00, 3102.80),
+            (4, '2026-03-01', 'West', 15600, 10234500.00, 3567.90),
+            (5, '2026-03-01', 'Central', 8900, 5678900.00, 2876.40),
+            (6, '2026-03-02', 'Northeast', 12500, 8267800.00, 3256.10),
+            (7, '2026-03-02', 'Southeast', 9920, 6156700.00, 2995.50),
+            (8, '2026-03-02', 'Midwest', 11250, 7489000.00, 3115.20),
+            (9, '2026-03-02', 'West', 15650, 10278900.00, 3578.30),
+            (10, '2026-03-02', 'Central', 8950, 5701200.00, 2889.60)
+        """)
+
+    elapsed = (time.time() - start) * 1000
+    return {"success": True, "elapsed_ms": round(elapsed, 2), "message": "Source table created with 10 rows"}
+
+
+@app.post("/api/retl/create-sync")
+async def retl_create_sync():
+    """Create the target table in Lakebase and perform initial sync from Delta."""
+    if _check_retl_target():
+        return {"status": "exists", "message": "Target table already exists in Lakebase"}
+
+    start = time.time()
+
+    # Create the table in Lakebase
+    execute_lakebase(f"""
+        CREATE TABLE IF NOT EXISTS {RETL_PG_TABLE} (
+            id BIGINT PRIMARY KEY,
+            report_date DATE,
+            region TEXT,
+            total_policies INTEGER,
+            total_premium NUMERIC(12,2),
+            avg_claim_amount NUMERIC(10,2)
+        )
+    """)
+
+    # Read all data from Delta
+    _, src_rows = query_dbsql(f"SELECT * FROM {RETL_FQN} ORDER BY {RETL_PK}")
+
+    # Insert into Lakebase
+    if src_rows:
+        conn = _get_pg_connection()
+        try:
+            with conn.cursor() as cur:
+                for row in src_rows:
+                    cur.execute(
+                        f"INSERT INTO {RETL_PG_TABLE} (id, report_date, region, total_policies, total_premium, avg_claim_amount) "
+                        f"VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+                        (row["id"], row["report_date"], row["region"],
+                         row["total_policies"], row["total_premium"], row["avg_claim_amount"]),
+                    )
+                conn.commit()
+        finally:
+            conn.close()
+
+    _retl_state["target_exists"] = True
+    elapsed = (time.time() - start) * 1000
+    return {
+        "status": "created",
+        "elapsed_ms": round(elapsed, 2),
+        "message": f"Synced {len(src_rows)} rows from Delta to Lakebase in {elapsed/1000:.1f}s",
+    }
+
+
+@app.post("/api/retl/trigger-sync")
+async def retl_trigger_sync():
+    """Sync new rows from Delta to Lakebase (incremental upsert)."""
+    if not _retl_state["target_exists"] and not _check_retl_target():
+        raise HTTPException(400, "No target table in Lakebase. Create one first.")
+
+    start = time.time()
+
+    # Get max ID already in Lakebase
+    _, tgt_rows = query_lakebase(f"SELECT COALESCE(MAX(id), 0) AS max_id FROM {RETL_PG_TABLE}")
+    max_id = tgt_rows[0]["max_id"]
+
+    # Read new rows from Delta
+    _, new_rows = query_dbsql(
+        f"SELECT * FROM {RETL_FQN} WHERE id > {max_id} ORDER BY {RETL_PK}"
+    )
+
+    synced = 0
+    if new_rows:
+        conn = _get_pg_connection()
+        try:
+            with conn.cursor() as cur:
+                for row in new_rows:
+                    cur.execute(
+                        f"INSERT INTO {RETL_PG_TABLE} (id, report_date, region, total_policies, total_premium, avg_claim_amount) "
+                        f"VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
+                        (row["id"], row["report_date"], row["region"],
+                         row["total_policies"], row["total_premium"], row["avg_claim_amount"]),
+                    )
+                conn.commit()
+                synced = len(new_rows)
+        finally:
+            conn.close()
+
+    elapsed = (time.time() - start) * 1000
+    return {
+        "success": True,
+        "elapsed_ms": round(elapsed, 2),
+        "synced_rows": synced,
+        "message": f"Synced {synced} new rows to Lakebase" if synced > 0 else "Already in sync — no new rows",
+    }
+
+
+@app.post("/api/retl/delete-sync")
+async def retl_delete_sync():
+    """Drop the target table in Lakebase."""
+    if not _retl_state["target_exists"] and not _check_retl_target():
+        return {"status": "not_found", "message": "No target table in Lakebase"}
+
+    start = time.time()
+    try:
+        execute_lakebase(f"DROP TABLE IF EXISTS {RETL_PG_TABLE}")
+    except Exception as e:
+        raise HTTPException(500, f"Failed to drop table: {e}")
+
+    _retl_state["target_exists"] = False
+    elapsed = (time.time() - start) * 1000
+    return {"status": "deleted", "elapsed_ms": round(elapsed, 2), "message": "Target table dropped from Lakebase"}
+
+
+@app.get("/api/retl/compare")
+async def retl_compare(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+):
+    """Compare source Delta table and target Lakebase table."""
+    offset = (page - 1) * page_size
+
+    # Query source via DBSQL
+    start = time.time()
+    _, src_count = query_dbsql(f"SELECT COUNT(*) AS cnt FROM {RETL_FQN}")
+    src_cols, src_rows = query_dbsql(
+        f"SELECT * FROM {RETL_FQN} ORDER BY {RETL_PK} LIMIT {page_size} OFFSET {offset}"
+    )
+    src_ms = (time.time() - start) * 1000
+
+    # Query target via psycopg
+    tgt_cols, tgt_rows, tgt_total, tgt_ms = [], [], 0, 0.0
+    if _retl_state["target_exists"] or _check_retl_target():
+        try:
+            start = time.time()
+            _, tgt_count = query_lakebase(f"SELECT COUNT(*) AS cnt FROM {RETL_PG_TABLE}")
+            tgt_cols, tgt_rows = query_lakebase(
+                f"SELECT * FROM {RETL_PG_TABLE} ORDER BY {RETL_PK} LIMIT {page_size} OFFSET {offset}"
+            )
+            tgt_total = tgt_count[0]["cnt"]
+            tgt_ms = (time.time() - start) * 1000
+            for row in tgt_rows:
+                for k, v in row.items():
+                    if hasattr(v, "isoformat"):
+                        row[k] = v.isoformat()
+                    elif isinstance(v, Decimal):
+                        row[k] = float(v)
+        except Exception:
+            pass
+
+    return {
+        "source": {
+            "columns": src_cols,
+            "rows": src_rows,
+            "total_count": src_count[0]["cnt"],
+            "elapsed_ms": round(src_ms, 2),
+        },
+        "target": {
+            "columns": tgt_cols,
+            "rows": tgt_rows,
+            "total_count": tgt_total,
+            "elapsed_ms": round(tgt_ms, 2),
+        },
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@app.post("/api/retl/insert")
+async def retl_insert():
+    """Insert a new row into the source Delta table."""
+    import random
+
+    start = time.time()
+
+    _, rows = query_dbsql(f"SELECT MAX(id) AS max_id FROM {RETL_FQN}")
+    next_id = (rows[0]["max_id"] or 0) + 1
+
+    regions = ["Northeast", "Southeast", "Midwest", "West", "Central"]
+    region = regions[(next_id - 1) % len(regions)]
+
+    policies = random.randint(5000, 20000)
+    premium = round(random.uniform(3000000, 12000000), 2)
+    avg_claim = round(random.uniform(2000, 4000), 2)
+
+    query_dbsql(f"""
+        INSERT INTO {RETL_FQN} VALUES
+        ({next_id}, CURRENT_DATE(), '{region}', {policies}, {premium}, {avg_claim})
+    """)
+
+    elapsed = (time.time() - start) * 1000
+    return {
+        "success": True,
+        "elapsed_ms": round(elapsed, 2),
+        "message": f"Inserted row {next_id} ({region}, {policies} policies, ${premium:,.2f} premium)",
+    }
+
+
+# --- Scale-to-Zero Demo ---
+
+# Query latency history: list of {elapsed_ms, state, timestamp}
+_s2z_history: list[dict[str, Any]] = []
+
+
+def _get_endpoint_info() -> dict[str, Any]:
+    """Get the production endpoint status and config."""
+    ep = w.postgres.get_endpoint(name=LAKEBASE_ENDPOINT)
+    status = ep.status
+    spec = ep.spec
+
+    # Determine state
+    state = "UNKNOWN"
+    if status and status.current_state:
+        state = str(status.current_state.value) if hasattr(status.current_state, "value") else str(status.current_state)
+        # Clean up enum prefix
+        state = state.replace("ENDPOINT_STATE_", "")
+
+    # Suspend timeout — lives in status, not spec
+    suspend_timeout = 0
+    for src in [status, spec]:
+        if src and getattr(src, "suspend_timeout_duration", None):
+            raw = src.suspend_timeout_duration
+            if hasattr(raw, "seconds"):
+                suspend_timeout = int(raw.seconds)
+            elif isinstance(raw, str) and raw.endswith("s"):
+                suspend_timeout = int(raw.rstrip("s"))
+            elif isinstance(raw, (int, float)):
+                suspend_timeout = int(raw)
+            if suspend_timeout > 0:
+                break
+
+    return {
+        "state": state,
+        "endpoint_name": ep.name,
+        "min_cu": float(status.autoscaling_limit_min_cu) if status and status.autoscaling_limit_min_cu else 0,
+        "max_cu": float(status.autoscaling_limit_max_cu) if status and status.autoscaling_limit_max_cu else 0,
+        "suspend_timeout_seconds": suspend_timeout,
+        "scale_to_zero_enabled": suspend_timeout > 0,
+    }
+
+
+@app.get("/api/s2z/status")
+async def s2z_status():
+    """Get endpoint state, config, and query history."""
+    info = _get_endpoint_info()
+    return {
+        **info,
+        "history": _s2z_history[-20:],  # last 20 queries
+    }
+
+
+@app.post("/api/s2z/configure")
+async def s2z_configure(timeout_seconds: int = Query(..., ge=0)):
+    """Set the scale-to-zero suspend timeout. 0 = disabled (always active)."""
+    from databricks.sdk.service.postgres import Endpoint, EndpointSpec, EndpointType, FieldMask
+    from google.protobuf.duration_pb2 import Duration
+
+    start = time.time()
+
+    # Get current endpoint config to preserve CU settings
+    current = _get_endpoint_info()
+
+    spec_kwargs: dict[str, Any] = {
+        "endpoint_type": EndpointType.ENDPOINT_TYPE_READ_WRITE,
+        "autoscaling_limit_min_cu": current["min_cu"] or 1.0,
+        "autoscaling_limit_max_cu": current["max_cu"] or 1.0,
+    }
+    if timeout_seconds > 0:
+        spec_kwargs["suspend_timeout_duration"] = Duration(seconds=timeout_seconds)
+    else:
+        spec_kwargs["no_suspension"] = True
+
+    w.postgres.update_endpoint(
+        name=LAKEBASE_ENDPOINT,
+        endpoint=Endpoint(
+            name=LAKEBASE_ENDPOINT,
+            spec=EndpointSpec(**spec_kwargs),
+        ),
+        update_mask=FieldMask(field_mask=["spec"]),
+    ).wait()
+
+    elapsed = (time.time() - start) * 1000
+    label = f"{timeout_seconds}s" if timeout_seconds > 0 else "disabled"
+    return {
+        "success": True,
+        "elapsed_ms": round(elapsed, 2),
+        "message": f"Scale-to-zero timeout set to {label}",
+    }
+
+
+@app.post("/api/s2z/query")
+async def s2z_query():
+    """Run a test query and record the latency. On cold start, runs a second
+    warm query to measure wake-up overhead separately."""
+    import datetime
+
+    # Get current state before query
+    info = _get_endpoint_info()
+    pre_state = info["state"]
+    is_cold = pre_state == "SUSPENDED"
+
+    # Run the query (includes wake-up time if suspended)
+    sql = f"SELECT COUNT(*) AS cnt FROM {LAKEBASE_SCHEMA}.policies"
+    start = time.time()
+    query_lakebase(sql)
+    elapsed = (time.time() - start) * 1000
+
+    # On cold start, immediately run a second warm query to isolate wake-up time
+    warm_ms = None
+    wakeup_ms = None
+    if is_cold:
+        start2 = time.time()
+        query_lakebase(sql)
+        warm_ms = round((time.time() - start2) * 1000, 2)
+        wakeup_ms = round(elapsed - warm_ms, 2)
+
+    entry = {
+        "elapsed_ms": round(elapsed, 2),
+        "pre_state": pre_state,
+        "cold_start": is_cold,
+        "warm_ms": warm_ms,
+        "wakeup_ms": wakeup_ms,
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+    }
+    _s2z_history.append(entry)
+
+    return entry
+
+
+@app.post("/api/s2z/clear-history")
+async def s2z_clear_history():
+    """Clear the query latency history."""
+    _s2z_history.clear()
+    return {"success": True}
+
+
+# --- Row-Level Security Demo ---
+
+RLS_TABLE = "agents"
+RLS_SCHEMA_TABLE = f"{LAKEBASE_SCHEMA}.{RLS_TABLE}"
+RLS_PK = "agent_id"
+RLS_REGIONS = ["Central", "Midwest", "Northeast", "Northwest", "South", "Southeast", "Southwest", "West"]
+RLS_PERSONAS = {r: f"rls_{r.lower()}" for r in RLS_REGIONS}  # region -> pg role
+
+# Track whether RLS has been set up on this app instance
+_rls_state: dict[str, Any] = {"enabled": True}  # Pre-configured via setup script
+
+
+def _query_lakebase_as_role(sql: str, role: str | None = None) -> tuple[list[str], list[dict]]:
+    """Query Lakebase, optionally as a specific Postgres role."""
+    conn = _get_pg_connection()
+    try:
+        with conn.cursor() as cur:
+            if role:
+                cur.execute(f"SET ROLE {role}")
+            else:
+                cur.execute("RESET ROLE")
+            cur.execute(sql)
+            columns = [desc[0] for desc in cur.description]
+            rows = []
+            for raw in cur.fetchall():
+                row = {}
+                for i, col in enumerate(columns):
+                    val = raw[i]
+                    if isinstance(val, Decimal):
+                        val = float(val)
+                    if hasattr(val, "isoformat"):
+                        val = val.isoformat()
+                    row[col] = val
+                rows.append(row)
+            return columns, rows
+    finally:
+        conn.close()
+
+
+@app.get("/api/rls/status")
+async def rls_status():
+    """Get RLS status and available personas."""
+    return {
+        "enabled": _rls_state["enabled"],
+        "table": RLS_SCHEMA_TABLE,
+        "personas": [
+            {"region": r, "role": RLS_PERSONAS[r]} for r in RLS_REGIONS
+        ],
+    }
+
+
+@app.get("/api/rls/query")
+async def rls_query(
+    persona: str = Query("admin"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
+):
+    """Query agents table as a specific persona."""
+    offset = (page - 1) * page_size
+    role = None
+    if persona != "admin" and persona in RLS_PERSONAS:
+        role = RLS_PERSONAS[persona]
+
+    count_sql = f"SELECT COUNT(*) AS cnt FROM {RLS_SCHEMA_TABLE}"
+    data_sql = f"SELECT * FROM {RLS_SCHEMA_TABLE} ORDER BY {RLS_PK} LIMIT {page_size} OFFSET {offset}"
+
+    start = time.time()
+    _, count_rows = _query_lakebase_as_role(count_sql, role)
+    columns, rows = _query_lakebase_as_role(data_sql, role)
+    elapsed = (time.time() - start) * 1000
+
+    return {
+        "persona": persona,
+        "role": role or "owner (bypasses RLS)",
+        "columns": columns,
+        "rows": rows,
+        "total_count": count_rows[0]["cnt"],
+        "page": page,
+        "page_size": page_size,
+        "elapsed_ms": round(elapsed, 2),
+    }
+
+
 # Serve static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -655,3 +1177,18 @@ async def dbsql_vs_lakebase():
 @app.get("/branching")
 async def branching():
     return FileResponse("static/branching.html")
+
+
+@app.get("/reverse-etl")
+async def reverse_etl():
+    return FileResponse("static/reverse-etl.html")
+
+
+@app.get("/scale-to-zero")
+async def scale_to_zero():
+    return FileResponse("static/scale-to-zero.html")
+
+
+@app.get("/row-level-security")
+async def row_level_security():
+    return FileResponse("static/row-level-security.html")

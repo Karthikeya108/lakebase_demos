@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Reverse ETL Demo - Lakebase Autoscaling</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    .spinner { border: 3px solid #f3f3f3; border-top: 3px solid #10b981; border-radius: 50%; width: 20px; height: 20px; animation: spin 0.8s linear infinite; display: inline-block; }
+    @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    .new-row { background-color: #ecfdf5 !important; }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+  <div class="max-w-7xl mx-auto px-4 py-6">
+    <!-- Header -->
+    <div class="mb-6">
+      <div class="flex items-center gap-3">
+        <a href="/" class="text-gray-400 hover:text-gray-600 transition-colors">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+          </svg>
+        </a>
+        <h1 class="text-3xl font-bold text-gray-900">Reverse ETL Demo</h1>
+      </div>
+      <p class="text-gray-500 mt-1 ml-8">Sync Delta Lake data to Lakebase Postgres — add rows to Delta and push them to Postgres</p>
+    </div>
+
+    <!-- Flow Diagram -->
+    <div class="mb-6 bg-white rounded-lg shadow p-4">
+      <div class="flex items-center justify-center gap-4 text-sm">
+        <div class="flex items-center gap-2 px-4 py-2 bg-blue-50 border border-blue-200 rounded-lg">
+          <svg class="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2 1 3 3 3h10c2 0 3-1 3-3V7"/>
+          </svg>
+          <span class="font-medium text-blue-700">Delta Lake (Lakehouse)</span>
+        </div>
+        <div class="flex items-center gap-1 text-gray-400">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6"/>
+          </svg>
+          <span class="text-xs">DBSQL + psycopg</span>
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7l5 5m0 0l-5 5m5-5H6"/>
+          </svg>
+        </div>
+        <div class="flex items-center gap-2 px-4 py-2 bg-green-50 border border-green-200 rounded-lg">
+          <svg class="w-4 h-4 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2 1 3 3 3h10c2 0 3-1 3-3V7"/>
+          </svg>
+          <span class="font-medium text-green-700">Lakebase Postgres</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Status Banner -->
+    <div id="status-banner" class="mb-6 rounded-lg shadow p-5 bg-gray-100 border border-gray-200">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <div id="status-dot" class="w-3 h-3 rounded-full bg-gray-400"></div>
+          <span id="status-text" class="font-medium text-gray-600">Checking status...</span>
+          <span id="status-detail" class="text-sm text-gray-400"></span>
+        </div>
+        <div id="status-buttons" class="flex gap-3"></div>
+      </div>
+    </div>
+
+    <!-- Timing Banner -->
+    <div id="timing-banner" class="hidden mb-6 rounded-lg shadow p-4 bg-green-50 border border-green-200">
+      <div class="flex items-center justify-between">
+        <span id="timing-label" class="text-sm font-medium text-green-700"></span>
+        <span id="timing-value" class="text-2xl font-bold text-green-700 tabular-nums"></span>
+      </div>
+    </div>
+
+    <!-- Actions (visible when synced) -->
+    <div id="actions-panel" class="hidden mb-6">
+      <div class="bg-white rounded-lg shadow p-4">
+        <h3 class="font-medium text-gray-700 mb-3">Actions</h3>
+        <div class="flex gap-3 flex-wrap">
+          <button onclick="insertRow()"
+            class="px-4 py-2 rounded-lg bg-blue-500 text-white text-sm font-medium hover:bg-blue-600 transition-colors">
+            Add Row to Delta Source
+          </button>
+          <button onclick="triggerSync()"
+            class="px-4 py-2 rounded-lg bg-green-500 text-white text-sm font-medium hover:bg-green-600 transition-colors">
+            Sync New Rows to Lakebase
+          </button>
+          <button onclick="checkStatus()"
+            class="px-4 py-2 rounded-lg bg-gray-500 text-white text-sm font-medium hover:bg-gray-600 transition-colors">
+            Refresh Status
+          </button>
+        </div>
+        <p id="action-result" class="mt-3 text-sm text-gray-500"></p>
+      </div>
+    </div>
+
+    <!-- Side-by-side comparison -->
+    <div id="compare-container" class="hidden">
+      <div class="grid grid-cols-2 gap-4">
+        <!-- Source (Delta) -->
+        <div>
+          <div class="bg-blue-600 text-white rounded-t-lg px-4 py-2 flex items-center justify-between">
+            <span class="font-medium">Source: Delta Lake</span>
+            <span id="src-time" class="text-sm opacity-80"></span>
+          </div>
+          <div class="bg-white rounded-b-lg shadow overflow-x-auto">
+            <div id="src-count" class="px-4 py-2 text-sm text-gray-500 border-b"></div>
+            <div id="src-table"></div>
+          </div>
+        </div>
+        <!-- Target (Lakebase) -->
+        <div>
+          <div class="bg-green-600 text-white rounded-t-lg px-4 py-2 flex items-center justify-between">
+            <span class="font-medium">Target: Lakebase Postgres</span>
+            <span id="tgt-time" class="text-sm opacity-80"></span>
+          </div>
+          <div class="bg-white rounded-b-lg shadow overflow-x-auto">
+            <div id="tgt-count" class="px-4 py-2 text-sm text-gray-500 border-b"></div>
+            <div id="tgt-table"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Pagination -->
+      <div id="pagination" class="hidden flex items-center justify-center mt-4 gap-4 bg-white rounded-lg shadow p-3">
+        <button id="btn-prev" onclick="changePage(-1)" class="px-3 py-1 rounded border text-sm hover:bg-gray-50 disabled:opacity-50">Previous</button>
+        <span id="page-info" class="text-sm text-gray-600"></span>
+        <button id="btn-next" onclick="changePage(1)" class="px-3 py-1 rounded border text-sm hover:bg-gray-50 disabled:opacity-50">Next</button>
+      </div>
+    </div>
+
+    <!-- Loading -->
+    <div id="loading" class="hidden p-8 text-center">
+      <div class="spinner mx-auto mb-2"></div>
+      <p id="loading-text" class="text-gray-500">Loading...</p>
+    </div>
+  </div>
+
+  <script>
+    let currentPage = 1;
+    const PAGE_SIZE = 25;
+    let syncedActive = false;
+    let sourceExists = false;
+
+    function init() {
+      checkStatus();
+    }
+
+    function showLoading(text) {
+      document.getElementById('loading-text').textContent = text;
+      document.getElementById('loading').classList.remove('hidden');
+    }
+
+    function hideLoading() {
+      document.getElementById('loading').classList.add('hidden');
+    }
+
+    function showTiming(label, ms) {
+      document.getElementById('timing-label').textContent = label;
+      document.getElementById('timing-value').textContent = `${ms.toFixed(1)} ms`;
+      document.getElementById('timing-banner').classList.remove('hidden');
+    }
+
+    async function checkStatus() {
+      try {
+        const res = await fetch('/api/retl/status');
+        const data = await res.json();
+        sourceExists = data.source_exists;
+        syncedActive = data.synced;
+        updateStatusUI(data);
+        if (sourceExists) loadComparison();
+      } catch (e) {
+        setStatus('error', 'Failed to check status', e.message, []);
+      }
+    }
+
+    function updateStatusUI(data) {
+      if (!data.source_exists) {
+        setStatus('inactive', 'Source table not created', 'Set up the Delta source table first', [
+          { label: 'Setup Source Table', onclick: 'setupSource()', color: 'bg-blue-600 hover:bg-blue-700' }
+        ]);
+        document.getElementById('actions-panel').classList.add('hidden');
+        document.getElementById('compare-container').classList.add('hidden');
+        return;
+      }
+
+      if (!data.synced) {
+        setStatus('source-only', 'Source table ready', `${data.source_table} — ${data.source_count} rows`, [
+          { label: 'Sync to Lakebase', onclick: 'createSync()', color: 'bg-green-600 hover:bg-green-700' }
+        ]);
+        document.getElementById('actions-panel').classList.add('hidden');
+        return;
+      }
+
+      // Target table exists in Lakebase
+      const syncState = data.sync_status ? data.sync_status.state : 'UNKNOWN';
+      const syncMsg = data.sync_status ? data.sync_status.message : '';
+      const stateColor = syncState === 'SYNCED' ? 'synced' :
+                         syncState === 'OUT_OF_SYNC' ? 'syncing' : 'error';
+
+      setStatus(stateColor, `Lakebase target active — ${syncState.replace('_', ' ')}`, syncMsg, [
+        { label: 'Drop Target Table', onclick: 'deleteSync()', color: 'bg-red-500 hover:bg-red-600' }
+      ]);
+      document.getElementById('actions-panel').classList.remove('hidden');
+    }
+
+    function setStatus(state, text, detail, buttons) {
+      const banner = document.getElementById('status-banner');
+      const dot = document.getElementById('status-dot');
+      const colors = {
+        'inactive': { banner: 'bg-gray-100 border-gray-200', dot: 'bg-gray-400', text: 'text-gray-600' },
+        'source-only': { banner: 'bg-blue-50 border-blue-200', dot: 'bg-blue-500', text: 'text-blue-700' },
+        'syncing': { banner: 'bg-amber-50 border-amber-200', dot: 'bg-amber-500 animate-pulse', text: 'text-amber-700' },
+        'synced': { banner: 'bg-green-50 border-green-200', dot: 'bg-green-500 animate-pulse', text: 'text-green-700' },
+        'error': { banner: 'bg-red-50 border-red-200', dot: 'bg-red-500', text: 'text-red-700' },
+      };
+      const c = colors[state] || colors.inactive;
+      banner.className = `mb-6 rounded-lg shadow p-5 ${c.banner}`;
+      dot.className = `w-3 h-3 rounded-full ${c.dot}`;
+      document.getElementById('status-text').className = `font-medium ${c.text}`;
+      document.getElementById('status-text').textContent = text;
+      document.getElementById('status-detail').textContent = detail;
+
+      const btnContainer = document.getElementById('status-buttons');
+      btnContainer.innerHTML = buttons.map(b =>
+        `<button onclick="${b.onclick}" class="px-4 py-2 rounded-lg ${b.color} text-white font-medium transition-colors text-sm">${b.label}</button>`
+      ).join('');
+    }
+
+    async function setupSource() {
+      showLoading('Creating source Delta table with CDF enabled...');
+      try {
+        const res = await fetch('/api/retl/setup-source', { method: 'POST' });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        showTiming('Source table created', data.elapsed_ms);
+        await checkStatus();
+      } catch (err) {
+        alert('Setup failed: ' + err.message);
+      } finally {
+        hideLoading();
+      }
+    }
+
+    async function createSync() {
+      showLoading('Syncing data from Delta to Lakebase...');
+      try {
+        const res = await fetch('/api/retl/create-sync', { method: 'POST' });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        showTiming('Initial sync complete', data.elapsed_ms);
+        await checkStatus();
+      } catch (err) {
+        alert('Failed to sync: ' + err.message);
+      } finally {
+        hideLoading();
+      }
+    }
+
+    async function deleteSync() {
+      if (!confirm('Drop the target table from Lakebase?')) return;
+      showLoading('Dropping target table...');
+      try {
+        const res = await fetch('/api/retl/delete-sync', { method: 'POST' });
+        if (!res.ok) throw new Error(await res.text());
+        await checkStatus();
+      } catch (err) {
+        alert('Failed to delete: ' + err.message);
+      } finally {
+        hideLoading();
+      }
+    }
+
+    async function insertRow() {
+      const resultEl = document.getElementById('action-result');
+      resultEl.innerHTML = '<div class="spinner inline-block mr-2"></div> Inserting row into Delta source...';
+      try {
+        const res = await fetch('/api/retl/insert', { method: 'POST' });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        resultEl.innerHTML = `<span class="text-blue-600 font-medium">${data.message}</span> <span class="text-gray-400">(${data.elapsed_ms.toFixed(1)} ms)</span>`;
+        loadComparison();
+      } catch (err) {
+        resultEl.innerHTML = `<span class="text-red-500">Error: ${err.message}</span>`;
+      }
+    }
+
+    async function triggerSync() {
+      const resultEl = document.getElementById('action-result');
+      resultEl.innerHTML = '<div class="spinner inline-block mr-2"></div> Syncing new rows to Lakebase...';
+      try {
+        const res = await fetch('/api/retl/trigger-sync', { method: 'POST' });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        const color = data.synced_rows > 0 ? 'text-green-600' : 'text-amber-600';
+        resultEl.innerHTML = `<span class="${color} font-medium">${data.message}</span> <span class="text-gray-400">(${data.elapsed_ms.toFixed(1)} ms)</span>`;
+        loadComparison();
+        checkStatus();
+      } catch (err) {
+        resultEl.innerHTML = `<span class="text-red-500">Error: ${err.message}</span>`;
+      }
+    }
+
+    async function loadComparison() {
+      document.getElementById('compare-container').classList.add('hidden');
+      try {
+        const res = await fetch(`/api/retl/compare?page=${currentPage}&page_size=${PAGE_SIZE}`);
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+
+        renderTable('src', data.source);
+        document.getElementById('src-count').textContent = `${data.source.total_count.toLocaleString()} rows`;
+        document.getElementById('src-time').textContent = `${data.source.elapsed_ms.toFixed(1)} ms`;
+
+        if (data.target.rows.length > 0 || syncedActive) {
+          renderTable('tgt', data.target);
+          document.getElementById('tgt-count').textContent = data.target.total_count > 0
+            ? `${data.target.total_count.toLocaleString()} rows`
+            : 'Table empty — sync to populate';
+          document.getElementById('tgt-time').textContent = data.target.elapsed_ms > 0
+            ? `${data.target.elapsed_ms.toFixed(1)} ms` : '—';
+        } else {
+          document.getElementById('tgt-table').innerHTML = '<p class="p-4 text-center text-gray-400">Not synced yet — click "Sync to Lakebase"</p>';
+          document.getElementById('tgt-count').textContent = '—';
+          document.getElementById('tgt-time').textContent = '—';
+        }
+
+        // Highlight rows in source that are missing from target
+        if (data.target.rows.length > 0) {
+          const tgtIds = new Set(data.target.rows.map(r => String(r.id)));
+          const srcCells = document.querySelectorAll('#src-table tr[data-id]');
+          srcCells.forEach(tr => {
+            if (!tgtIds.has(tr.dataset.id)) {
+              tr.querySelectorAll('td').forEach(td => td.classList.add('new-row'));
+            }
+          });
+        }
+
+        // Pagination
+        const maxTotal = Math.max(data.source.total_count, data.target.total_count || 0);
+        const totalPages = Math.ceil(maxTotal / PAGE_SIZE);
+        const pag = document.getElementById('pagination');
+        if (totalPages > 1) {
+          pag.classList.remove('hidden');
+          document.getElementById('page-info').textContent = `Page ${currentPage} of ${totalPages}`;
+          document.getElementById('btn-prev').disabled = currentPage <= 1;
+          document.getElementById('btn-next').disabled = currentPage >= totalPages;
+        } else {
+          pag.classList.add('hidden');
+        }
+
+        document.getElementById('compare-container').classList.remove('hidden');
+      } catch (err) {
+        // Silently fail on comparison load
+      }
+    }
+
+    function renderTable(prefix, data) {
+      const container = document.getElementById(`${prefix}-table`);
+      if (!data.rows || !data.rows.length) {
+        container.innerHTML = '<p class="p-4 text-center text-gray-400">No data</p>';
+        return;
+      }
+      let html = '<table class="min-w-full divide-y divide-gray-200"><thead class="bg-gray-50"><tr>';
+      data.columns.forEach(col => {
+        html += `<th class="px-3 py-2 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">${col}</th>`;
+      });
+      html += '</tr></thead><tbody class="divide-y divide-gray-200">';
+      data.rows.forEach(row => {
+        html += `<tr data-id="${row.id || ''}">`;
+        data.columns.forEach(col => {
+          const val = row[col] !== null && row[col] !== undefined ? row[col] : '';
+          const formatted = typeof val === 'number' && col !== 'id' && col !== 'total_policies'
+            ? Number(val).toLocaleString(undefined, { minimumFractionDigits: col.includes('amount') || col.includes('premium') ? 2 : 0 })
+            : val;
+          html += `<td class="px-3 py-1.5 text-xs text-gray-700 whitespace-nowrap">${formatted === '' ? '<span class="text-gray-300">—</span>' : formatted}</td>`;
+        });
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+      container.innerHTML = html;
+    }
+
+    function changePage(delta) {
+      currentPage += delta;
+      loadComparison();
+    }
+
+    init();
+  </script>
+</body>
+</html>
