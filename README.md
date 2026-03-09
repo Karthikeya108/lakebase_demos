@@ -1,4 +1,4 @@
-# TKO 2026 - Lakebase Autoscaling Demos
+# Lakebase Autoscaling Demos
 
 Interactive demos showcasing Databricks Lakebase Autoscaling capabilities. A Databricks App provides hands-on exploration of data access patterns, database branching, and more — all built on an insurance dataset with ~570K records across 10 tables.
 
@@ -6,9 +6,9 @@ All resources (SQL warehouse, Lakebase project, UC tables, app configuration) ar
 
 ## Demos
 
-### 1. DBSQL vs Lakebase
+### 1. Lakehouse vs Lakebase
 
-Compare performance across four data access methods side by side:
+Compare performance across four data access methods side by side, using an insurance domain dataset (~570K records across 10 tables):
 
 | Method | Engine | Protocol | Description |
 |--------|--------|----------|-------------|
