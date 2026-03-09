@@ -92,6 +92,37 @@ pb_ts.FromDatetime(dt)
 w.postgres.create_branch(..., spec=BranchSpec(source_branch_time=pb_ts, ...))
 ```
 
+### 7. CI/CD Schema Migration
+
+Propagate schema changes through development, staging, and production environments using Lakebase branches with changelog-based migrations:
+
+- **3-column pipeline view**: Development (amber) → Staging (blue) → Production (green)
+- **Changelog-based migrations**: 4 migrations defined as up/down pairs — create `agent_metrics` table, populate from agents, calculate performance ratings, assign certification levels
+- **Per-environment tracking**: A `schema_migrations` table tracks which migrations are applied per branch — just like Liquibase or Flyway
+- **Branch isolation**: Dev and staging are Lakebase branches; schema changes on dev don't affect production until promoted
+- **Rollback support**: Roll back applied migrations in reverse order on any environment
+- **Reset**: Delete dev/staging branches and roll back production to start fresh
+
+Each environment is a Lakebase branch with its own compute endpoint. The app SP creates and owns `agent_metrics` (avoiding ownership issues with pre-existing tables). Stale migration records inherited from production are auto-detected and cleaned up.
+
+### 8. ORM (SQLAlchemy)
+
+Use SQLAlchemy 2.x with Lakebase Postgres — proving that standard Postgres ORMs work out of the box:
+
+- **Schema Reflection**: `MetaData.reflect()` auto-discovers all 10 tables with columns, types, primary keys, foreign keys, and nullable constraints — no model definitions needed
+- **Table Browser**: Select a table, filter by any column, paginate through results. The generated SQLAlchemy ORM code is displayed alongside the data
+- **Query Comparison**: 5 predefined queries run via both raw psycopg3 and SQLAlchemy side-by-side with timing comparison (COUNT, WHERE, JOIN+GROUP BY, HAVING, aggregation)
+- **Relationship Navigator**: Pick any table + primary key value to explore all related records via auto-discovered foreign keys with sample data
+
+Uses `postgresql+psycopg` driver with OAuth token refresh via SQLAlchemy's `do_connect` event listener:
+```python
+engine = create_engine("postgresql+psycopg://...", connect_args={"hostaddr": ip})
+
+@event.listens_for(engine, "do_connect")
+def on_connect(dialect, conn_rec, cargs, cparams):
+    cparams["password"] = w.postgres.generate_database_credential(...).token
+```
+
 ## Architecture
 
 - **Lakehouse**: Delta tables in Unity Catalog, queried via a Photon-enabled SQL warehouse
@@ -101,6 +132,8 @@ w.postgres.create_branch(..., spec=BranchSpec(source_branch_time=pb_ts, ...))
 - **Scale-to-Zero**: Compute lifecycle management via `w.postgres.update_endpoint()` with protobuf Duration
 - **Row-Level Security**: PostgreSQL RLS policies with `SET ROLE` persona switching
 - **Point-in-Time Restore**: Branch from any past timestamp via `source_branch_time` with protobuf Timestamp
+- **CI/CD Schema Migration**: Changelog-based migrations across branch environments with `schema_migrations` tracking
+- **ORM**: SQLAlchemy 2.x with `postgresql+psycopg` driver, auto-reflection, and OAuth token refresh
 - **App**: FastAPI + Tailwind CSS served as a Databricks App
 
 ## Data Model
@@ -141,7 +174,9 @@ tko_2026/
 │       ├── reverse-etl.html          # Reverse ETL demo
 │       ├── scale-to-zero.html        # Scale-to-Zero demo
 │       ├── row-level-security.html   # Row-Level Security demo
-│       └── point-in-time-restore.html # Point-in-Time Restore demo
+│       ├── point-in-time-restore.html # Point-in-Time Restore demo
+│       ├── cicd.html                 # CI/CD Schema Migration demo
+│       └── orm.html                  # ORM (SQLAlchemy) demo
 └── populate_lakebase.py              # Standalone script for manual Lakebase population
 ```
 

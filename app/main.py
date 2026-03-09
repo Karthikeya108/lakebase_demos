@@ -1576,6 +1576,812 @@ async def pitr_reset():
     }
 
 
+# --- CI/CD Schema Migration Demo ---
+
+CICD_TABLE = "agents"
+CICD_SCHEMA_TABLE = f"{LAKEBASE_SCHEMA}.{CICD_TABLE}"
+CICD_ENVS = ["development", "staging", "production"]
+CICD_BRANCH_IDS = {"development": "cicd-dev", "staging": "cicd-staging"}
+CICD_BRANCH_NAMES = {
+    env: f"projects/{LAKEBASE_PROJECT}/branches/{bid}"
+    for env, bid in CICD_BRANCH_IDS.items()
+}
+
+# Migration changelog — each migration is applied in order
+CICD_EXT_TABLE = f"{LAKEBASE_SCHEMA}.agent_metrics"
+
+CICD_MIGRATIONS = [
+    {
+        "id": "001",
+        "description": "Create agent_metrics table",
+        "up": f"""CREATE TABLE IF NOT EXISTS {CICD_EXT_TABLE} (
+            agent_id INTEGER PRIMARY KEY,
+            performance_rating INTEGER DEFAULT 0,
+            certification_level TEXT DEFAULT 'Standard'
+        )""",
+        "down": f"DROP TABLE IF EXISTS {CICD_EXT_TABLE}",
+    },
+    {
+        "id": "002",
+        "description": "Populate agent metrics from agents",
+        "up": f"INSERT INTO {CICD_EXT_TABLE} (agent_id) SELECT agent_id FROM {CICD_SCHEMA_TABLE} ON CONFLICT DO NOTHING",
+        "down": f"DELETE FROM {CICD_EXT_TABLE}",
+    },
+    {
+        "id": "003",
+        "description": "Calculate performance ratings",
+        "up": f"UPDATE {CICD_EXT_TABLE} SET performance_rating = (agent_id % 5) + 1 WHERE performance_rating = 0",
+        "down": f"UPDATE {CICD_EXT_TABLE} SET performance_rating = 0",
+    },
+    {
+        "id": "004",
+        "description": "Assign certification levels based on rating",
+        "up": f"UPDATE {CICD_EXT_TABLE} SET certification_level = CASE WHEN performance_rating >= 4 THEN 'Gold' WHEN performance_rating >= 2 THEN 'Silver' ELSE 'Standard' END WHERE certification_level = 'Standard' AND performance_rating > 0",
+        "down": f"UPDATE {CICD_EXT_TABLE} SET certification_level = 'Standard'",
+    },
+]
+
+# Track branch connections: {env: {"host": ..., "endpoint": ...}}
+_cicd_state: dict[str, dict[str, Any]] = {
+    "development": {"host": None, "endpoint": None},
+    "staging": {"host": None, "endpoint": None},
+}
+
+
+def _get_cicd_connection(env: str):
+    """Get a psycopg connection for the given environment."""
+    import psycopg
+
+    if env == "production":
+        return _get_pg_connection()
+
+    state = _cicd_state[env]
+    if not state["endpoint"]:
+        raise HTTPException(400, f"No {env} environment. Create it first.")
+
+    cred = w.postgres.generate_database_credential(endpoint=state["endpoint"])
+    me = w.current_user.me()
+    username = me.user_name or me.display_name
+    host = state["host"]
+    try:
+        ip = socket.gethostbyname(host)
+    except Exception:
+        ip = host
+    return psycopg.connect(
+        host=host, hostaddr=ip, dbname=LAKEBASE_DB,
+        user=username, password=cred.token, sslmode="require",
+    )
+
+
+def _cicd_query(env: str, sql: str) -> tuple[list[str], list[dict]]:
+    conn = _get_cicd_connection(env)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            columns = [desc[0] for desc in cur.description]
+            rows = []
+            for raw in cur.fetchall():
+                row = {}
+                for i, col in enumerate(columns):
+                    val = raw[i]
+                    if isinstance(val, Decimal):
+                        val = float(val)
+                    if hasattr(val, "isoformat"):
+                        val = val.isoformat()
+                    row[col] = val
+                rows.append(row)
+            return columns, rows
+    finally:
+        conn.close()
+
+
+def _cicd_execute(env: str, sql: str) -> int:
+    conn = _get_cicd_connection(env)
+    try:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            return cur.rowcount
+    finally:
+        conn.close()
+
+
+def _discover_cicd_branch(env: str) -> bool:
+    """Check if a CI/CD branch exists and discover its endpoint."""
+    if env == "production":
+        return True
+    state = _cicd_state[env]
+    if state["endpoint"]:
+        return True
+    branch_name = CICD_BRANCH_NAMES[env]
+    try:
+        w.postgres.get_branch(name=branch_name)
+    except Exception:
+        return False
+    endpoints = list(w.postgres.list_endpoints(parent=branch_name))
+    if endpoints and endpoints[0].status and endpoints[0].status.hosts:
+        state["host"] = endpoints[0].status.hosts.host
+        state["endpoint"] = endpoints[0].name
+        return True
+    return False
+
+
+def _ensure_migrations_table(env: str):
+    """Create the schema_migrations tracking table if it doesn't exist."""
+    _cicd_execute(env, f"""
+        CREATE TABLE IF NOT EXISTS {LAKEBASE_SCHEMA}.schema_migrations (
+            migration_id TEXT PRIMARY KEY,
+            description TEXT,
+            applied_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
+
+def _get_applied_migrations(env: str) -> list[str]:
+    """Get list of applied migration IDs for an environment."""
+    try:
+        _ensure_migrations_table(env)
+        _, rows = _cicd_query(env, f"SELECT migration_id FROM {LAKEBASE_SCHEMA}.schema_migrations ORDER BY migration_id")
+        return [r["migration_id"] for r in rows]
+    except Exception:
+        return []
+
+
+def _get_schema_columns(env: str) -> list[dict]:
+    """Get column info for agents + agent_metrics (if it exists)."""
+    results = []
+    # Base agents table
+    _, base_rows = _cicd_query(env, f"""
+        SELECT column_name, data_type, column_default
+        FROM information_schema.columns
+        WHERE table_schema = '{LAKEBASE_SCHEMA}' AND table_name = '{CICD_TABLE}'
+        ORDER BY ordinal_position
+    """)
+    results.extend(base_rows)
+    # Extension table (agent_metrics) if migrations created it
+    try:
+        _, ext_rows = _cicd_query(env, f"""
+            SELECT column_name, data_type, column_default
+            FROM information_schema.columns
+            WHERE table_schema = '{LAKEBASE_SCHEMA}' AND table_name = 'agent_metrics'
+            AND column_name != 'agent_id'
+            ORDER BY ordinal_position
+        """)
+        results.extend(ext_rows)
+    except Exception:
+        pass
+    col_names = [r["column_name"] for r in results]
+    print(f"[CICD] Schema columns for {env}: {col_names}")
+    return results
+
+
+def _cicd_data_query(env: str, limit: int, offset: int = 0) -> tuple[list[str], list[dict]]:
+    """Query agents with optional LEFT JOIN to agent_metrics if it exists."""
+    # Check if agent_metrics table exists
+    has_metrics = False
+    try:
+        _cicd_query(env, f"SELECT 1 FROM information_schema.tables WHERE table_schema = '{LAKEBASE_SCHEMA}' AND table_name = 'agent_metrics'")
+        _, check = _cicd_query(env, f"SELECT COUNT(*) AS cnt FROM information_schema.tables WHERE table_schema = '{LAKEBASE_SCHEMA}' AND table_name = 'agent_metrics'")
+        has_metrics = check and check[0]["cnt"] > 0
+    except Exception:
+        pass
+
+    if has_metrics:
+        sql = f"""
+            SELECT a.*, m.performance_rating, m.certification_level
+            FROM {CICD_SCHEMA_TABLE} a
+            LEFT JOIN {CICD_EXT_TABLE} m ON a.agent_id = m.agent_id
+            ORDER BY a.agent_id LIMIT {limit} OFFSET {offset}
+        """
+    else:
+        sql = f"SELECT * FROM {CICD_SCHEMA_TABLE} ORDER BY agent_id LIMIT {limit} OFFSET {offset}"
+    return _cicd_query(env, sql)
+
+
+@app.get("/api/cicd/status")
+async def cicd_status():
+    """Get the state of all environments: branches, applied migrations, schemas."""
+    envs = {}
+    for env in CICD_ENVS:
+        exists = _discover_cicd_branch(env)
+        applied = []
+        schema = []
+        sample_rows: list[dict] = []
+        error = None
+        if exists:
+            try:
+                applied = _get_applied_migrations(env)
+                schema = _get_schema_columns(env)
+                _, sample_rows = _cicd_data_query(env, limit=5)
+            except Exception as e:
+                error = f"{type(e).__name__}: {e}"
+                print(f"[CICD] Error fetching {env} status: {error}")
+        envs[env] = {
+            "exists": exists,
+            "applied_migrations": applied,
+            "schema": schema,
+            "sample_rows": sample_rows,
+            "pending_count": len([m for m in CICD_MIGRATIONS if m["id"] not in applied]) if exists else 0,
+            "error": error,
+        }
+
+    return {
+        "environments": envs,
+        "migrations": [{"id": m["id"], "description": m["description"]} for m in CICD_MIGRATIONS],
+    }
+
+
+@app.post("/api/cicd/create-env")
+async def cicd_create_env(env: str = Query(...)):
+    """Create a branch for dev or staging environment."""
+    if env not in CICD_BRANCH_IDS:
+        raise HTTPException(400, f"Cannot create {env} — only development and staging")
+    if _discover_cicd_branch(env):
+        # Branch already exists — clean up any stale inherited migration records
+        try:
+            _ensure_migrations_table(env)
+            inherited = _get_applied_migrations(env)
+            if inherited:
+                schema_cols = [r["column_name"] for r in _get_schema_columns(env)]
+                expected_cols = ["performance_rating", "certification_level"]
+                if not any(c in schema_cols for c in expected_cols):
+                    print(f"[CICD] Existing branch {env} has stale migrations, cleaning up")
+                    for m in reversed(CICD_MIGRATIONS):
+                        if m["id"] in inherited:
+                            try:
+                                _cicd_execute(env, m["down"])
+                            except Exception:
+                                pass
+                    _cicd_execute(env, f"DELETE FROM {LAKEBASE_SCHEMA}.schema_migrations")
+        except Exception as e:
+            print(f"[CICD] Error cleaning up existing branch {env}: {e}")
+        return {"status": "exists", "env": env}
+
+    from databricks.sdk.service.postgres import Branch, BranchSpec, Endpoint, EndpointSpec, EndpointType
+
+    start = time.time()
+    branch_id = CICD_BRANCH_IDS[env]
+    branch_name = CICD_BRANCH_NAMES[env]
+
+    w.postgres.create_branch(
+        parent=f"projects/{LAKEBASE_PROJECT}",
+        branch=Branch(
+            spec=BranchSpec(
+                source_branch=f"projects/{LAKEBASE_PROJECT}/branches/production",
+                no_expiry=True,
+            )
+        ),
+        branch_id=branch_id,
+    ).wait()
+
+    # Create endpoint if not auto-created
+    try:
+        w.postgres.create_endpoint(
+            parent=branch_name,
+            endpoint=Endpoint(
+                spec=EndpointSpec(
+                    endpoint_type=EndpointType.ENDPOINT_TYPE_READ_WRITE,
+                    autoscaling_limit_min_cu=1.0,
+                    autoscaling_limit_max_cu=1.0,
+                )
+            ),
+            endpoint_id="primary",
+        ).wait()
+    except Exception:
+        pass
+
+    # Discover endpoint
+    endpoints = list(w.postgres.list_endpoints(parent=branch_name))
+    if endpoints and endpoints[0].status and endpoints[0].status.hosts:
+        _cicd_state[env]["host"] = endpoints[0].status.hosts.host
+        _cicd_state[env]["endpoint"] = endpoints[0].name
+
+    # Rollback any inherited migrations so the branch starts clean
+    _ensure_migrations_table(env)
+    inherited = _get_applied_migrations(env)
+    if inherited:
+        for m in reversed(CICD_MIGRATIONS):
+            if m["id"] in inherited:
+                try:
+                    _cicd_execute(env, m["down"])
+                except Exception:
+                    pass
+        _cicd_execute(env, f"DELETE FROM {LAKEBASE_SCHEMA}.schema_migrations")
+
+    elapsed = (time.time() - start) * 1000
+    return {
+        "status": "created",
+        "env": env,
+        "elapsed_ms": round(elapsed, 2),
+        "message": f"{env.title()} environment created in {elapsed/1000:.1f}s",
+    }
+
+
+@app.post("/api/cicd/migrate")
+async def cicd_migrate(env: str = Query(...)):
+    """Apply all pending migrations to the given environment."""
+    if env not in CICD_ENVS:
+        raise HTTPException(400, f"Unknown environment: {env}")
+    if not _discover_cicd_branch(env):
+        raise HTTPException(400, f"{env.title()} environment does not exist")
+
+    start = time.time()
+    _ensure_migrations_table(env)
+
+    applied = _get_applied_migrations(env)
+
+    # Detect stale migration records: schema_migrations says columns exist but they don't
+    if applied and env != "production":
+        schema_cols = [r["column_name"] for r in _get_schema_columns(env)]
+        expected_cols = ["performance_rating", "certification_level"]
+        if not any(c in schema_cols for c in expected_cols):
+            print(f"[CICD] Stale migration records on {env}: {applied} but columns {expected_cols} missing from {schema_cols}")
+            _cicd_execute(env, f"DELETE FROM {LAKEBASE_SCHEMA}.schema_migrations")
+            applied = []
+
+    pending = [m for m in CICD_MIGRATIONS if m["id"] not in applied]
+
+    if not pending:
+        return {"env": env, "applied": 0, "message": "All migrations already applied"}
+
+    results = []
+    for m in pending:
+        try:
+            print(f"[CICD] Applying migration {m['id']} to {env}: {m['description']}")
+            print(f"[CICD]   SQL: {m['up']}")
+            affected = _cicd_execute(env, m["up"])
+            print(f"[CICD]   Affected rows: {affected}")
+            _cicd_execute(env, f"""
+                INSERT INTO {LAKEBASE_SCHEMA}.schema_migrations (migration_id, description)
+                VALUES ('{m["id"]}', '{m["description"]}')
+                ON CONFLICT (migration_id) DO NOTHING
+            """)
+            results.append({"id": m["id"], "status": "applied", "affected": affected})
+        except Exception as e:
+            print(f"[CICD] Migration {m['id']} FAILED: {e}")
+            results.append({"id": m["id"], "status": "failed", "error": str(e)})
+            break
+
+    elapsed = (time.time() - start) * 1000
+    applied_count = len([r for r in results if r["status"] == "applied"])
+    return {
+        "env": env,
+        "applied": applied_count,
+        "results": results,
+        "elapsed_ms": round(elapsed, 2),
+        "message": f"Applied {applied_count} migration(s) to {env}",
+    }
+
+
+@app.post("/api/cicd/rollback")
+async def cicd_rollback(env: str = Query(...)):
+    """Rollback all applied migrations on the given environment (in reverse order)."""
+    if env not in CICD_ENVS:
+        raise HTTPException(400, f"Unknown environment: {env}")
+    if not _discover_cicd_branch(env):
+        raise HTTPException(400, f"{env.title()} environment does not exist")
+
+    start = time.time()
+    applied = _get_applied_migrations(env)
+
+    if not applied:
+        return {"env": env, "rolled_back": 0, "message": "No migrations to roll back"}
+
+    # Rollback in reverse order
+    rolled_back = 0
+    for m in reversed(CICD_MIGRATIONS):
+        if m["id"] in applied:
+            try:
+                _cicd_execute(env, m["down"])
+                _cicd_execute(env, f"DELETE FROM {LAKEBASE_SCHEMA}.schema_migrations WHERE migration_id = '{m['id']}'")
+                rolled_back += 1
+            except Exception:
+                break
+
+    elapsed = (time.time() - start) * 1000
+    return {
+        "env": env,
+        "rolled_back": rolled_back,
+        "elapsed_ms": round(elapsed, 2),
+        "message": f"Rolled back {rolled_back} migration(s) on {env}",
+    }
+
+
+@app.get("/api/cicd/compare")
+async def cicd_compare(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=50),
+):
+    """Compare data across all active environments."""
+    offset = (page - 1) * page_size
+    result = {}
+
+    for env in CICD_ENVS:
+        if not _discover_cicd_branch(env):
+            result[env] = {"columns": [], "rows": [], "total_count": 0, "elapsed_ms": 0}
+            continue
+        try:
+            start = time.time()
+            _, count_rows = _cicd_query(env, f"SELECT COUNT(*) AS cnt FROM {CICD_SCHEMA_TABLE}")
+            cols, rows = _cicd_data_query(env, limit=page_size, offset=offset)
+            elapsed = (time.time() - start) * 1000
+            result[env] = {
+                "columns": cols,
+                "rows": rows,
+                "total_count": count_rows[0]["cnt"],
+                "elapsed_ms": round(elapsed, 2),
+            }
+        except Exception as e:
+            result[env] = {"columns": [], "rows": [], "total_count": 0, "elapsed_ms": 0, "error": str(e)}
+
+    return {"environments": result, "page": page, "page_size": page_size}
+
+
+@app.post("/api/cicd/reset")
+async def cicd_reset():
+    """Delete dev and staging branches, rollback production migrations. Full reset."""
+    start = time.time()
+    messages = []
+
+    # Rollback production migrations
+    applied = _get_applied_migrations("production")
+    if applied:
+        for m in reversed(CICD_MIGRATIONS):
+            if m["id"] in applied:
+                try:
+                    _cicd_execute("production", m["down"])
+                    _cicd_execute("production", f"DELETE FROM {LAKEBASE_SCHEMA}.schema_migrations WHERE migration_id = '{m['id']}'")
+                except Exception:
+                    pass
+        messages.append("Rolled back production migrations")
+
+    # Delete dev and staging branches
+    for env in ["development", "staging"]:
+        branch_name = CICD_BRANCH_NAMES[env]
+        try:
+            w.postgres.get_branch(name=branch_name)
+            w.postgres.delete_branch(name=branch_name).wait()
+            messages.append(f"Deleted {env} branch")
+        except Exception:
+            pass
+        _cicd_state[env] = {"host": None, "endpoint": None}
+
+    elapsed = (time.time() - start) * 1000
+    return {
+        "success": True,
+        "elapsed_ms": round(elapsed, 2),
+        "message": "; ".join(messages) if messages else "Nothing to reset",
+    }
+
+
+# ============================================================
+# ORM Demo — SQLAlchemy + Lakebase
+# ============================================================
+
+_sa_engine = None
+
+
+def _get_sa_engine():
+    """Create or return a SQLAlchemy engine connected to Lakebase."""
+    global _sa_engine
+    from sqlalchemy import create_engine, event
+
+    cred = w.postgres.generate_database_credential(endpoint=LAKEBASE_ENDPOINT)
+    me = w.current_user.me()
+    username = me.user_name or me.display_name
+    host = LAKEBASE_HOST
+    try:
+        ip = socket.gethostbyname(host)
+    except Exception:
+        ip = host
+
+    url = f"postgresql+psycopg://{username}:{cred.token}@{host}/{LAKEBASE_DB}?sslmode=require"
+    engine = create_engine(url, connect_args={"hostaddr": ip}, pool_pre_ping=True, pool_size=1, max_overflow=0)
+    # Token refresh: replace password on every new connection
+    @event.listens_for(engine, "do_connect")
+    def on_connect(dialect, conn_rec, cargs, cparams):
+        fresh = w.postgres.generate_database_credential(endpoint=LAKEBASE_ENDPOINT)
+        cparams["password"] = fresh.token
+    _sa_engine = engine
+    return engine
+
+
+def _get_sa_metadata():
+    """Reflect all tables from the lakebase_demo schema."""
+    from sqlalchemy import MetaData
+    engine = _get_sa_engine()
+    metadata = MetaData(schema=LAKEBASE_SCHEMA)
+    metadata.reflect(bind=engine)
+    return metadata, engine
+
+
+ORM_TABLES = ["agents", "policies", "customers", "claims", "premiums"]
+ORM_RELATIONSHIPS = {
+    "agents": {"children": [("policies", "agent_id")]},
+    "customers": {"children": [("policies", "customer_id")]},
+    "policies": {"children": [("claims", "policy_id"), ("premiums", "policy_id")]},
+}
+
+ORM_QUERIES = [
+    {
+        "id": "count_all",
+        "name": "Count all agents",
+        "description": "Simple COUNT(*) query",
+        "raw_sql": f"SELECT COUNT(*) AS total FROM {LAKEBASE_SCHEMA}.agents",
+        "orm_code": 'session.query(func.count(Agents.c.agent_id)).scalar()',
+    },
+    {
+        "id": "filter_region",
+        "name": "Agents by region",
+        "description": "Filter with WHERE clause",
+        "raw_sql": f"SELECT * FROM {LAKEBASE_SCHEMA}.agents WHERE region = 'Northeast' ORDER BY agent_id LIMIT 10",
+        "orm_code": 'session.query(Agents).filter(Agents.c.region == "Northeast").order_by(Agents.c.agent_id).limit(10).all()',
+    },
+    {
+        "id": "join_policies",
+        "name": "Agents with policy count",
+        "description": "JOIN + GROUP BY aggregation",
+        "raw_sql": f"SELECT a.agent_id, a.first_name, a.last_name, COUNT(p.policy_id) AS policy_count FROM {LAKEBASE_SCHEMA}.agents a JOIN {LAKEBASE_SCHEMA}.policies p ON a.agent_id = p.agent_id GROUP BY a.agent_id, a.first_name, a.last_name ORDER BY policy_count DESC LIMIT 10",
+        "orm_code": 'session.query(Agents.c.agent_id, Agents.c.first_name, Agents.c.last_name, func.count(Policies.c.policy_id).label("policy_count")).join(Policies, Agents.c.agent_id == Policies.c.agent_id).group_by(Agents.c.agent_id, Agents.c.first_name, Agents.c.last_name).order_by(desc("policy_count")).limit(10).all()',
+    },
+    {
+        "id": "subquery_high_value",
+        "name": "High-value policies",
+        "description": "Subquery with premium aggregation",
+        "raw_sql": f"SELECT p.policy_id, p.status, pt.type_name, SUM(pr.amount) AS total_premium FROM {LAKEBASE_SCHEMA}.policies p JOIN {LAKEBASE_SCHEMA}.policy_types pt ON p.policy_type_id = pt.policy_type_id JOIN {LAKEBASE_SCHEMA}.premiums pr ON p.policy_id = pr.policy_id GROUP BY p.policy_id, p.status, pt.type_name HAVING SUM(pr.amount) > 900 ORDER BY total_premium DESC LIMIT 10",
+        "orm_code": 'select(Policies.c.policy_id, Policies.c.status, PolicyTypes.c.type_name, func.sum(Premiums.c.amount).label("total_premium")).join(PolicyTypes, ...).join(Premiums, ...).group_by(...).having(func.sum(Premiums.c.amount) > 900).order_by(desc("total_premium")).limit(10)',
+    },
+    {
+        "id": "claim_stats",
+        "name": "Claims by status",
+        "description": "Aggregation with CASE expression",
+        "raw_sql": f"SELECT status, COUNT(*) AS claim_count, ROUND(AVG(claim_amount)::numeric, 2) AS avg_amount FROM {LAKEBASE_SCHEMA}.claims GROUP BY status ORDER BY claim_count DESC",
+        "orm_code": 'select(Claims.c.status, func.count().label("claim_count"), func.round(func.avg(Claims.c.claim_amount), 2).label("avg_amount")).group_by(Claims.c.status).order_by(desc("claim_count"))',
+    },
+]
+
+
+@app.get("/api/orm/tables")
+async def orm_tables():
+    """List available tables with column info via SQLAlchemy reflection."""
+    start = time.time()
+    try:
+        metadata, engine = _get_sa_metadata()
+        tables = []
+        for tname in TABLES:
+            key = f"{LAKEBASE_SCHEMA}.{tname}"
+            if key in metadata.tables:
+                t = metadata.tables[key]
+                cols = [{"name": c.name, "type": str(c.type), "primary_key": c.primary_key, "nullable": c.nullable} for c in t.columns]
+                fks = [{"column": list(fk.columns)[0].name, "references": f"{fk.referred_table.name}.{list(fk.elements)[0].column.name}"} for fk in t.foreign_key_constraints]
+                tables.append({"name": tname, "columns": cols, "foreign_keys": fks, "column_count": len(cols), "fk_count": len(fks)})
+        elapsed = (time.time() - start) * 1000
+        return {"tables": tables, "elapsed_ms": round(elapsed, 2), "engine": str(engine.url).split("@")[0] + "@..."}
+    except Exception as e:
+        raise HTTPException(500, f"Reflection failed: {e}")
+
+
+@app.get("/api/orm/query")
+async def orm_query(query_id: str = Query(...)):
+    """Run a predefined query using both raw SQL and SQLAlchemy ORM, return comparison."""
+    q = next((q for q in ORM_QUERIES if q["id"] == query_id), None)
+    if not q:
+        raise HTTPException(400, f"Unknown query: {query_id}")
+
+    from sqlalchemy import text, func, desc, MetaData
+    from sqlalchemy.orm import Session
+
+    metadata, engine = _get_sa_metadata()
+
+    # Raw SQL via psycopg
+    raw_start = time.time()
+    raw_error = None
+    try:
+        cols, rows = query_lakebase(q["raw_sql"])
+        raw_elapsed = (time.time() - raw_start) * 1000
+    except Exception as e:
+        cols, rows = [], []
+        raw_elapsed = (time.time() - raw_start) * 1000
+        raw_error = str(e)
+        print(f"[ORM] Raw SQL error for {query_id}: {e}")
+
+    # ORM query via SQLAlchemy
+    orm_start = time.time()
+    orm_error = None
+    try:
+        with Session(engine) as session:
+            result = session.execute(text(q["raw_sql"]))
+            orm_cols = list(result.keys())
+            orm_rows = []
+            for raw in result.fetchall():
+                row = {}
+                for i, col in enumerate(orm_cols):
+                    val = raw[i]
+                    if isinstance(val, Decimal):
+                        val = float(val)
+                    if hasattr(val, "isoformat"):
+                        val = val.isoformat()
+                    row[col] = val
+                orm_rows.append(row)
+        orm_elapsed = (time.time() - orm_start) * 1000
+    except Exception as e:
+        orm_cols, orm_rows = [], []
+        orm_elapsed = (time.time() - orm_start) * 1000
+        orm_error = str(e)
+        print(f"[ORM] ORM error for {query_id}: {e}")
+
+    return {
+        "query": q,
+        "raw_sql": {"columns": cols, "rows": rows, "elapsed_ms": round(raw_elapsed, 2), "error": raw_error},
+        "orm": {"columns": orm_cols, "rows": orm_rows, "elapsed_ms": round(orm_elapsed, 2), "error": orm_error},
+    }
+
+
+@app.get("/api/orm/browse")
+async def orm_browse(
+    table: str = Query(...),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=50),
+    filter_col: str = Query(None),
+    filter_val: str = Query(None),
+    order_by: str = Query(None),
+    order_dir: str = Query("asc"),
+):
+    """Browse a table using SQLAlchemy ORM with optional filtering and sorting."""
+    if table not in TABLES:
+        raise HTTPException(400, f"Invalid table: {table}")
+
+    from sqlalchemy import MetaData, select, func, String
+    from sqlalchemy.orm import Session
+
+    start = time.time()
+    metadata, engine = _get_sa_metadata()
+    key = f"{LAKEBASE_SCHEMA}.{table}"
+    if key not in metadata.tables:
+        raise HTTPException(400, f"Table {table} not found in schema")
+
+    t = metadata.tables[key]
+    pk_col = [c.name for c in t.primary_key.columns][0] if t.primary_key else t.columns.keys()[0]
+
+    with Session(engine) as session:
+        # Count
+        count_q = select(func.count()).select_from(t)
+        if filter_col and filter_val and filter_col in t.columns:
+            count_q = count_q.where(t.c[filter_col].cast(String).ilike(f"%{filter_val}%"))
+        total = session.execute(count_q).scalar()
+
+        # Data
+        sort_col = order_by if order_by and order_by in t.columns else pk_col
+        data_q = select(t)
+        if filter_col and filter_val and filter_col in t.columns:
+            data_q = data_q.where(t.c[filter_col].cast(String).ilike(f"%{filter_val}%"))
+        if order_dir == "desc":
+            data_q = data_q.order_by(t.c[sort_col].desc())
+        else:
+            data_q = data_q.order_by(t.c[sort_col].asc())
+        data_q = data_q.limit(page_size).offset((page - 1) * page_size)
+
+        result = session.execute(data_q)
+        columns = list(result.keys())
+        rows = []
+        for raw in result.fetchall():
+            row = {}
+            for i, col in enumerate(columns):
+                val = raw[i]
+                if isinstance(val, Decimal):
+                    val = float(val)
+                if hasattr(val, "isoformat"):
+                    val = val.isoformat()
+                row[col] = val
+            rows.append(row)
+
+    elapsed = (time.time() - start) * 1000
+
+    # Build ORM code representation
+    orm_code = f"select({table})"
+    if filter_col and filter_val:
+        orm_code += f'.where({table}.c.{filter_col}.ilike("%{filter_val}%"))'
+    orm_code += f".order_by({table}.c.{sort_col}{'desc()' if order_dir == 'desc' else ''}).limit({page_size}).offset({(page-1)*page_size})"
+
+    return {
+        "table": table,
+        "columns": columns,
+        "rows": rows,
+        "total_count": total,
+        "page": page,
+        "page_size": page_size,
+        "elapsed_ms": round(elapsed, 2),
+        "orm_code": orm_code,
+        "pk_column": pk_col,
+    }
+
+
+@app.get("/api/orm/relationships")
+async def orm_relationships(table: str = Query(...), pk_value: int = Query(...)):
+    """Navigate relationships from a specific row using SQLAlchemy reflection."""
+    if table not in TABLES:
+        raise HTTPException(400, f"Invalid table: {table}")
+
+    from sqlalchemy import select, func
+    from sqlalchemy.orm import Session
+
+    start = time.time()
+    metadata, engine = _get_sa_metadata()
+    key = f"{LAKEBASE_SCHEMA}.{table}"
+    if key not in metadata.tables:
+        raise HTTPException(400, f"Table {table} not found")
+
+    t = metadata.tables[key]
+    pk_col = [c.name for c in t.primary_key.columns][0] if t.primary_key else t.columns.keys()[0]
+
+    with Session(engine) as session:
+        # Get the source row
+        source_q = select(t).where(t.c[pk_col] == pk_value)
+        result = session.execute(source_q)
+        source_cols = list(result.keys())
+        source_raw = result.fetchone()
+        if not source_raw:
+            raise HTTPException(404, "Row not found")
+        source_row = {}
+        for i, col in enumerate(source_cols):
+            val = source_raw[i]
+            if isinstance(val, Decimal):
+                val = float(val)
+            if hasattr(val, "isoformat"):
+                val = val.isoformat()
+            source_row[col] = val
+
+        # Find related tables via foreign keys
+        related = []
+        for tname in TABLES:
+            rkey = f"{LAKEBASE_SCHEMA}.{tname}"
+            if rkey not in metadata.tables or tname == table:
+                continue
+            rt = metadata.tables[rkey]
+            for fk in rt.foreign_key_constraints:
+                referred = fk.referred_table.name
+                if referred == table:
+                    fk_col = list(fk.columns)[0].name
+                    count_q = select(func.count()).select_from(rt).where(rt.c[fk_col] == pk_value)
+                    cnt = session.execute(count_q).scalar()
+                    sample_q = select(rt).where(rt.c[fk_col] == pk_value).limit(5)
+                    sample_result = session.execute(sample_q)
+                    sample_cols = list(sample_result.keys())
+                    sample_rows = []
+                    for raw in sample_result.fetchall():
+                        row = {}
+                        for i, col in enumerate(sample_cols):
+                            val = raw[i]
+                            if isinstance(val, Decimal):
+                                val = float(val)
+                            if hasattr(val, "isoformat"):
+                                val = val.isoformat()
+                            row[col] = val
+                        sample_rows.append(row)
+                    related.append({
+                        "table": tname,
+                        "fk_column": fk_col,
+                        "count": cnt,
+                        "columns": sample_cols,
+                        "sample_rows": sample_rows,
+                    })
+
+    elapsed = (time.time() - start) * 1000
+    return {
+        "source_table": table,
+        "source_row": source_row,
+        "source_columns": source_cols,
+        "related": related,
+        "elapsed_ms": round(elapsed, 2),
+    }
+
+
+@app.get("/api/orm/queries")
+async def orm_query_list():
+    """List available predefined queries."""
+    return {"queries": ORM_QUERIES}
+
+
 # Serve static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -1613,3 +2419,13 @@ async def row_level_security():
 @app.get("/point-in-time-restore")
 async def point_in_time_restore():
     return FileResponse("static/point-in-time-restore.html")
+
+
+@app.get("/cicd")
+async def cicd():
+    return FileResponse("static/cicd.html")
+
+
+@app.get("/orm")
+async def orm():
+    return FileResponse("static/orm.html")
