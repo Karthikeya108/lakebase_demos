@@ -2382,6 +2382,242 @@ async def orm_query_list():
     return {"queries": ORM_QUERIES}
 
 
+# ============================================================
+# Autoscaling Under Load Demo
+# ============================================================
+
+import asyncio
+import concurrent.futures
+import threading
+
+_load_test_state: dict[str, Any] = {
+    "running": False,
+    "results": [],       # list of {query_id, query_type, started_at, elapsed_ms, success, error}
+    "start_time": None,
+    "concurrency": 10,
+    "total_planned": 0,
+    "total_done": 0,
+    "stop_requested": False,
+}
+_load_test_lock = threading.Lock()
+
+LOAD_QUERIES = {
+    "heavy": f"""
+        SELECT a.agent_id, a.first_name, a.last_name, a.region,
+               COUNT(DISTINCT p.policy_id) AS policies,
+               COUNT(DISTINCT c.claim_id) AS claims,
+               COALESCE(SUM(pr.amount), 0) AS total_premiums
+        FROM {LAKEBASE_SCHEMA}.agents a
+        JOIN {LAKEBASE_SCHEMA}.policies p ON a.agent_id = p.agent_id
+        LEFT JOIN {LAKEBASE_SCHEMA}.claims c ON p.policy_id = c.policy_id
+        LEFT JOIN {LAKEBASE_SCHEMA}.premiums pr ON p.policy_id = pr.policy_id
+        GROUP BY a.agent_id, a.first_name, a.last_name, a.region
+        ORDER BY total_premiums DESC
+        LIMIT 50
+    """,
+    "medium": f"""
+        SELECT p.policy_id, p.status, p.premium_amount,
+               COUNT(c.claim_id) AS claim_count,
+               COALESCE(SUM(c.claim_amount), 0) AS total_claims
+        FROM {LAKEBASE_SCHEMA}.policies p
+        LEFT JOIN {LAKEBASE_SCHEMA}.claims c ON p.policy_id = c.policy_id
+        GROUP BY p.policy_id, p.status, p.premium_amount
+        HAVING COUNT(c.claim_id) > 0
+        ORDER BY total_claims DESC
+        LIMIT 100
+    """,
+    "light": f"""
+        SELECT region, COUNT(*) AS agent_count,
+               SUM(CASE WHEN is_active THEN 1 ELSE 0 END) AS active_count
+        FROM {LAKEBASE_SCHEMA}.agents
+        GROUP BY region
+        ORDER BY agent_count DESC
+    """,
+}
+
+
+def _run_single_query(query_id: int, query_type: str):
+    """Run a single query and record the result."""
+    import psycopg
+    start = time.time()
+    error = None
+    success = True
+    try:
+        cred = w.postgres.generate_database_credential(endpoint=LAKEBASE_ENDPOINT)
+        me = w.current_user.me()
+        username = me.user_name or me.display_name
+        host = LAKEBASE_HOST
+        try:
+            ip = socket.gethostbyname(host)
+        except Exception:
+            ip = host
+        conn = psycopg.connect(
+            host=host, hostaddr=ip, dbname=LAKEBASE_DB,
+            user=username, password=cred.token, sslmode="require",
+            connect_timeout=30,
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(LOAD_QUERIES[query_type])
+                cur.fetchall()
+        finally:
+            conn.close()
+    except Exception as e:
+        success = False
+        error = str(e)
+
+    elapsed = (time.time() - start) * 1000
+    result = {
+        "query_id": query_id,
+        "query_type": query_type,
+        "elapsed_ms": round(elapsed, 2),
+        "success": success,
+        "error": error,
+        "timestamp": round(time.time() - (_load_test_state["start_time"] or time.time()), 2),
+    }
+    with _load_test_lock:
+        _load_test_state["results"].append(result)
+        _load_test_state["total_done"] += 1
+
+
+def _load_test_worker(concurrency: int, waves: int, mix: list[str]):
+    """Background worker that fires waves of concurrent queries."""
+    _load_test_state["start_time"] = time.time()
+    query_id = 0
+
+    for wave in range(waves):
+        if _load_test_state["stop_requested"]:
+            break
+
+        futures = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
+            for i in range(concurrency):
+                if _load_test_state["stop_requested"]:
+                    break
+                query_type = mix[query_id % len(mix)]
+                futures.append(pool.submit(_run_single_query, query_id, query_type))
+                query_id += 1
+            concurrent.futures.wait(futures)
+
+        # Brief pause between waves
+        if not _load_test_state["stop_requested"] and wave < waves - 1:
+            time.sleep(1)
+
+    with _load_test_lock:
+        _load_test_state["running"] = False
+
+
+@app.post("/api/autoscale/configure")
+async def autoscale_configure(min_cu: float = Query(1.0), max_cu: float = Query(8.0)):
+    """Set the autoscaling CU range for the production endpoint."""
+    from databricks.sdk.service.postgres import Endpoint, EndpointSpec, EndpointType, FieldMask
+
+    start = time.time()
+    # Get current config to preserve other settings
+    current = _get_endpoint_info()
+    spec_kwargs: dict[str, Any] = {
+        "endpoint_type": EndpointType.ENDPOINT_TYPE_READ_WRITE,
+        "autoscaling_limit_min_cu": min_cu,
+        "autoscaling_limit_max_cu": max_cu,
+    }
+    # Preserve suspend timeout if set
+    if current.get("suspend_timeout_seconds", 0) > 0:
+        from google.protobuf.duration_pb2 import Duration
+        spec_kwargs["suspend_timeout_duration"] = Duration(seconds=current["suspend_timeout_seconds"])
+    else:
+        spec_kwargs["no_suspension"] = True
+
+    w.postgres.update_endpoint(
+        name=LAKEBASE_ENDPOINT,
+        endpoint=Endpoint(
+            name=LAKEBASE_ENDPOINT,
+            spec=EndpointSpec(**spec_kwargs),
+        ),
+        update_mask=FieldMask(field_mask=["spec"]),
+    ).wait()
+    elapsed = (time.time() - start) * 1000
+    return {"min_cu": min_cu, "max_cu": max_cu, "elapsed_ms": round(elapsed, 2)}
+
+
+@app.get("/api/autoscale/endpoint-status")
+async def autoscale_endpoint_status():
+    """Get current endpoint compute status."""
+    info = _get_endpoint_info()
+    return {
+        "state": info["state"],
+        "min_cu": info["min_cu"],
+        "max_cu": info["max_cu"],
+    }
+
+
+@app.post("/api/autoscale/start")
+async def autoscale_start(
+    concurrency: int = Query(10, ge=1, le=50),
+    waves: int = Query(5, ge=1, le=20),
+    mix: str = Query("heavy,medium,light"),
+):
+    """Start a load test with concurrent query waves."""
+    if _load_test_state["running"]:
+        raise HTTPException(400, "Load test already running")
+
+    query_mix = [m.strip() for m in mix.split(",") if m.strip() in LOAD_QUERIES]
+    if not query_mix:
+        query_mix = ["heavy", "medium", "light"]
+
+    total = concurrency * waves
+    with _load_test_lock:
+        _load_test_state["running"] = True
+        _load_test_state["results"] = []
+        _load_test_state["start_time"] = None
+        _load_test_state["concurrency"] = concurrency
+        _load_test_state["total_planned"] = total
+        _load_test_state["total_done"] = 0
+        _load_test_state["stop_requested"] = False
+
+    thread = threading.Thread(target=_load_test_worker, args=(concurrency, waves, query_mix), daemon=True)
+    thread.start()
+
+    return {"status": "started", "concurrency": concurrency, "waves": waves, "total_queries": total, "mix": query_mix}
+
+
+@app.post("/api/autoscale/stop")
+async def autoscale_stop():
+    """Stop the running load test."""
+    _load_test_state["stop_requested"] = True
+    return {"status": "stop_requested"}
+
+
+@app.get("/api/autoscale/results")
+async def autoscale_results(since: int = Query(0)):
+    """Get load test results. Pass since=N to get results after index N."""
+    with _load_test_lock:
+        results = _load_test_state["results"][since:]
+        return {
+            "running": _load_test_state["running"],
+            "total_planned": _load_test_state["total_planned"],
+            "total_done": _load_test_state["total_done"],
+            "results": results,
+            "since": since,
+            "next_since": since + len(results),
+        }
+
+
+@app.post("/api/autoscale/baseline")
+async def autoscale_baseline():
+    """Run one query of each type to establish baseline latencies."""
+    baselines = {}
+    for qtype, sql in LOAD_QUERIES.items():
+        start = time.time()
+        try:
+            query_lakebase(sql)
+            elapsed = (time.time() - start) * 1000
+            baselines[qtype] = {"elapsed_ms": round(elapsed, 2), "success": True}
+        except Exception as e:
+            elapsed = (time.time() - start) * 1000
+            baselines[qtype] = {"elapsed_ms": round(elapsed, 2), "success": False, "error": str(e)}
+    return {"baselines": baselines}
+
+
 # Serve static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -2429,3 +2665,8 @@ async def cicd():
 @app.get("/orm")
 async def orm():
     return FileResponse("static/orm.html")
+
+
+@app.get("/autoscale")
+async def autoscale():
+    return FileResponse("static/autoscale.html")

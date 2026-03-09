@@ -123,6 +123,24 @@ def on_connect(dialect, conn_rec, cargs, cparams):
     cparams["password"] = w.postgres.generate_database_credential(...).token
 ```
 
+### 9. Autoscaling Under Load
+
+Fire waves of concurrent queries and watch latency improve as Lakebase dynamically scales compute:
+
+- **Configure autoscaling range**: Set min/max CU (e.g., 1-8 CU) via `w.postgres.update_endpoint()`
+- **Baseline measurement**: Run one query of each type to establish warm latency before load
+- **Load test controls**: Configurable concurrency (5-50), waves (3-20), and query mix (heavy/medium/light)
+- **3 query types**:
+  - **Heavy** (red): 4-table JOIN across agents, policies, claims, premiums with GROUP BY
+  - **Medium** (amber): 2-table JOIN on policies + claims with HAVING
+  - **Light** (green): Single-table GROUP BY on agents
+- **Real-time scatter chart**: Per-query latency over time, color-coded by query type — shows latency dropping as compute scales up
+- **Wave chart**: Average latency bars + queries/sec throughput line per wave
+- **Stats dashboard**: Total queries, avg/min/max latency updated in real-time
+- **Query log**: Scrolling log of every query with timestamp, type, and latency
+
+Uses background threading with `concurrent.futures.ThreadPoolExecutor` to fire truly concurrent queries. Each query opens its own psycopg3 connection with a fresh OAuth token. The endpoint status is polled every 10 seconds to track compute state.
+
 ## Architecture
 
 - **Lakehouse**: Delta tables in Unity Catalog, queried via a Photon-enabled SQL warehouse
@@ -134,6 +152,7 @@ def on_connect(dialect, conn_rec, cargs, cparams):
 - **Point-in-Time Restore**: Branch from any past timestamp via `source_branch_time` with protobuf Timestamp
 - **CI/CD Schema Migration**: Changelog-based migrations across branch environments with `schema_migrations` tracking
 - **ORM**: SQLAlchemy 2.x with `postgresql+psycopg` driver, auto-reflection, and OAuth token refresh
+- **Autoscaling Under Load**: Concurrent query load testing with real-time latency visualization
 - **App**: FastAPI + Tailwind CSS served as a Databricks App
 
 ## Data Model
@@ -176,7 +195,8 @@ tko_2026/
 │       ├── row-level-security.html   # Row-Level Security demo
 │       ├── point-in-time-restore.html # Point-in-Time Restore demo
 │       ├── cicd.html                 # CI/CD Schema Migration demo
-│       └── orm.html                  # ORM (SQLAlchemy) demo
+│       ├── orm.html                  # ORM (SQLAlchemy) demo
+│       └── autoscale.html            # Autoscaling Under Load demo
 └── populate_lakebase.py              # Standalone script for manual Lakebase population
 ```
 
