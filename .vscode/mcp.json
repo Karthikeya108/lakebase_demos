@@ -1,9 +1,0 @@
-{
-  "servers": {
-    "databricks": {
-      "command": "/Users/karthik.subbarao/.ai-dev-kit/.venv/bin/python",
-      "args": ["/Users/karthik.subbarao/.ai-dev-kit/repo/databricks-mcp-server/run_server.py"],
-      "env": {"DATABRICKS_CONFIG_PROFILE": "uc-demo-ws-ne"}
-    }
-  }
-}
