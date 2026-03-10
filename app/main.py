@@ -469,10 +469,10 @@ async def branch_status():
 
 
 def _create_branch_with_endpoint():
-    """Create the branch and its compute endpoint. Returns the endpoint."""
+    """Create the branch and discover its compute endpoint."""
     from databricks.sdk.service.postgres import Branch, BranchSpec, Endpoint, EndpointSpec, EndpointType
 
-    # Create branch
+    # Create branch (auto-creates a default read-write endpoint)
     w.postgres.create_branch(
         parent=f"projects/{LAKEBASE_PROJECT}",
         branch=Branch(
@@ -484,23 +484,30 @@ def _create_branch_with_endpoint():
         branch_id=BRANCH_ID,
     ).wait()
 
-    # Create compute endpoint on the branch
-    w.postgres.create_endpoint(
-        parent=BRANCH_NAME,
-        endpoint=Endpoint(
-            spec=EndpointSpec(
-                endpoint_type=EndpointType.ENDPOINT_TYPE_READ_WRITE,
-                autoscaling_limit_min_cu=1.0,
-                autoscaling_limit_max_cu=1.0,
-            )
-        ),
-        endpoint_id="primary",
-    ).wait()
+    # Try to create a compute endpoint; if one already exists (auto-created), skip
+    try:
+        w.postgres.create_endpoint(
+            parent=BRANCH_NAME,
+            endpoint=Endpoint(
+                spec=EndpointSpec(
+                    endpoint_type=EndpointType.ENDPOINT_TYPE_READ_WRITE,
+                    autoscaling_limit_min_cu=1.0,
+                    autoscaling_limit_max_cu=1.0,
+                )
+            ),
+            endpoint_id="primary",
+        ).wait()
+    except Exception as e:
+        if "already exists" not in str(e).lower():
+            raise
 
-    # Discover the endpoint host
-    ep = w.postgres.get_endpoint(name=f"{BRANCH_NAME}/endpoints/primary")
-    _branch_state["host"] = ep.status.hosts.host
-    _branch_state["endpoint"] = ep.name
+    # Discover the endpoint host (works with both auto-created and manually created endpoints)
+    endpoints = list(w.postgres.list_endpoints(parent=BRANCH_NAME))
+    if endpoints and endpoints[0].status and endpoints[0].status.hosts:
+        _branch_state["host"] = endpoints[0].status.hosts.host
+        _branch_state["endpoint"] = endpoints[0].name
+    else:
+        raise HTTPException(500, "Branch created but no endpoint found")
 
 
 @app.post("/api/branch/create")
@@ -620,12 +627,24 @@ async def reset_branch():
     _branch_state["host"] = None
     _branch_state["endpoint"] = None
 
-    # Delete existing branch
+    # Delete endpoints first, then branch (avoids "endpoint already exists" race)
+    try:
+        for ep in w.postgres.list_endpoints(parent=BRANCH_NAME):
+            try:
+                w.postgres.delete_endpoint(name=ep.name).wait()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     try:
         w.postgres.delete_branch(name=BRANCH_NAME).wait()
     except Exception as e:
         if "NOT_FOUND" not in str(e):
             raise HTTPException(500, f"Failed to delete branch: {e}")
+
+    # Small delay to ensure backend cleanup completes
+    time.sleep(2)
 
     # Recreate branch + endpoint
     _create_branch_with_endpoint()
