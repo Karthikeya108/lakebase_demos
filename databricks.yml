@@ -13,18 +13,16 @@ variables:
     default: "tko-2026-demo"
   lakebase_db:
     default: "tko_2026_demo"
-
 targets:
   dev:
     default: true
     mode: development
-    workspace:
+    workspace: &workspace_config
       host: https://adb-4116661263058619.19.azuredatabricks.net
-      profile: DEFAULT
+      profile: uc-demo-ws-ne
 
   prod:
     mode: production
     workspace:
-      host: https://adb-4116661263058619.19.azuredatabricks.net
-      profile: DEFAULT
+      <<: *workspace_config
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}

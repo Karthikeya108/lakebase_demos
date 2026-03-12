@@ -205,10 +205,12 @@ tko_2026/
 ### Prerequisites
 
 - Databricks CLI configured with a profile
-- Access to an Azure Databricks workspace with Unity Catalog enabled
+- Access to a Databricks workspace with Unity Catalog enabled
 - Permissions to create catalogs, SQL warehouses, Lakebase projects, and apps
 
 ### Deploy Everything
+
+Update the variables in `databricks.yml` file.
 
 ```bash
 # 1. Validate the bundle
