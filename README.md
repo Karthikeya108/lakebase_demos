@@ -340,3 +340,8 @@ This removes the DABs-managed resources (job, app). To fully clean up, also dele
 - SQL warehouse: via Databricks UI or `databricks warehouses delete <id>`
 - Lakebase project: `databricks postgres delete-project projects/<project-name>`
 - UC catalog/schema: `DROP SCHEMA <catalog>.<schema> CASCADE`
+
+## Disclaimer:
+
+- The sample app provided is intended to aid in getting started and may not be production-ready. The code does not have any guarantees/warantees/support. Use it at your own risk.
+- This repo contains AI generated elements.
