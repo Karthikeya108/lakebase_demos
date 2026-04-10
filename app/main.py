@@ -658,16 +658,26 @@ async def reset_branch():
 
 
 # --- Reverse ETL Demo ---
-# Manual copy approach: read from Delta via DBSQL, write to Lakebase via psycopg.
-# Demonstrates the data flow pattern without requiring a UC online catalog.
+# Uses the Lakebase Autoscaling Synced Tables API (POST /api/2.0/postgres/synced_tables)
+# to sync Delta tables to Lakebase Postgres via a managed Spark Declarative Pipeline.
+# The SDK doesn't expose these methods yet, so we call the REST API directly
+# via the SDK's internal API client (same pattern the SDK uses).
 
 RETL_TABLE = "analytics_output"
 RETL_FQN = f"{UC_CATALOG}.{UC_SCHEMA}.{RETL_TABLE}"
-RETL_PG_TABLE = f"{LAKEBASE_SCHEMA}.{RETL_TABLE}"
+RETL_SYNCED_TABLE = f"{UC_CATALOG}.{UC_SCHEMA}.{RETL_TABLE}_synced"
+RETL_PG_TABLE = f"{LAKEBASE_SCHEMA}.{RETL_TABLE}_synced"
 RETL_PK = "id"
+RETL_SYNCED_TABLE_RESOURCE = f"synced_tables/{RETL_SYNCED_TABLE}"
 
-# Track whether the sync target table exists in Lakebase
-_retl_state: dict[str, Any] = {"target_exists": False}
+# Internal API client for calling the Postgres REST API directly
+_pg_api = w.postgres._api
+
+
+def _pg_do(method: str, path: str, **kwargs):
+    """Call the Postgres REST API via the SDK's internal API client."""
+    headers = {"Accept": "application/json", "Content-Type": "application/json"}
+    return _pg_api.do(method, f"/api/2.0/postgres/{path}", headers=headers, **kwargs)
 
 
 def _check_retl_source() -> bool:
@@ -679,52 +689,80 @@ def _check_retl_source() -> bool:
         return False
 
 
-def _check_retl_target() -> bool:
-    """Check if the target Lakebase table exists."""
+def _get_synced_table_status() -> dict[str, Any] | None:
+    """Get the synced table status from the Postgres API. Returns None if not found."""
     try:
-        query_lakebase(f"SELECT 1 FROM {RETL_PG_TABLE} LIMIT 1")
-        _retl_state["target_exists"] = True
-        return True
+        res = _pg_do("GET", RETL_SYNCED_TABLE_RESOURCE)
+        status = res.get("status", {})
+        pipeline_id = status.get("pipeline_id")
+        pipeline_url = None
+        if pipeline_id:
+            host = w.config.host.rstrip("/")
+            pipeline_url = f"{host}#joblist/pipelines/{pipeline_id}"
+        return {
+            "exists": True,
+            "state": status.get("detailed_state", "UNKNOWN"),
+            "message": status.get("message", ""),
+            "pipeline_id": pipeline_id,
+            "pipeline_url": pipeline_url,
+        }
     except Exception:
-        _retl_state["target_exists"] = False
-        return False
+        return None
 
 
 @app.get("/api/retl/status")
 async def retl_status():
-    """Check if source table and target Lakebase table exist."""
+    """Check if source table and synced table exist, with sync status."""
     source_exists = _check_retl_source()
-    target_exists = _check_retl_target()
+    synced_info = _get_synced_table_status()
 
-    # Get row counts
     src_count = 0
-    tgt_count = 0
     if source_exists:
         try:
             _, rows = query_dbsql(f"SELECT COUNT(*) AS cnt FROM {RETL_FQN}")
             src_count = rows[0]["cnt"]
         except Exception:
             pass
-    if target_exists:
+
+    tgt_count = 0
+    synced = synced_info is not None
+    if synced:
         try:
             _, rows = query_lakebase(f"SELECT COUNT(*) AS cnt FROM {RETL_PG_TABLE}")
             tgt_count = rows[0]["cnt"]
         except Exception:
             pass
 
+    sync_status = None
+    if source_exists and synced and synced_info:
+        state = synced_info["state"]
+        # Map API states to user-friendly status
+        if "PROVISIONING" in state:
+            friendly = "PROVISIONING"
+        elif "FAILED" in state:
+            friendly = "FAILED"
+        elif "ONLINE" in state:
+            friendly = "SYNCED" if src_count == tgt_count else "SYNCING"
+        else:
+            friendly = state
+        sync_status = {
+            "state": friendly,
+            "detailed_state": state,
+            "message": synced_info["message"] or f"{tgt_count}/{src_count} rows synced",
+            "pipeline_id": synced_info.get("pipeline_id"),
+            "pipeline_url": synced_info.get("pipeline_url"),
+        }
+    elif source_exists:
+        sync_status = {"state": "NOT_CREATED", "detailed_state": "NOT_CREATED", "message": "Synced table not created"}
+
     return {
         "source_exists": source_exists,
         "source_table": RETL_FQN,
         "source_count": src_count,
-        "synced": target_exists,
+        "synced": synced,
         "target_table": RETL_PG_TABLE,
         "target_count": tgt_count,
-        "sync_status": {
-            "state": "SYNCED" if target_exists and src_count == tgt_count else
-                     "OUT_OF_SYNC" if target_exists and src_count != tgt_count else
-                     "NOT_CREATED",
-            "message": f"{tgt_count}/{src_count} rows synced" if target_exists else "Target table not created",
-        } if source_exists else None,
+        "sync_status": sync_status,
     }
 
 
@@ -768,110 +806,86 @@ async def retl_setup_source():
 
 @app.post("/api/retl/create-sync")
 async def retl_create_sync():
-    """Create the target table in Lakebase and perform initial sync from Delta."""
-    if _check_retl_target():
-        return {"status": "exists", "message": "Target table already exists in Lakebase"}
+    """Create a synced table via the Lakebase Autoscaling Synced Tables API."""
+    existing = _get_synced_table_status()
+    if existing:
+        return {"status": "exists", "message": f"Synced table already exists (state: {existing['state']})"}
 
     start = time.time()
 
-    # Create the table in Lakebase
-    execute_lakebase(f"""
-        CREATE TABLE IF NOT EXISTS {RETL_PG_TABLE} (
-            id BIGINT PRIMARY KEY,
-            report_date DATE,
-            region TEXT,
-            total_policies INTEGER,
-            total_premium NUMERIC(12,2),
-            avg_claim_amount NUMERIC(10,2)
-        )
-    """)
+    res = _pg_do(
+        "POST", "synced_tables",
+        query={"synced_table_id": RETL_SYNCED_TABLE},
+        body={
+            "spec": {
+                "source_table_full_name": RETL_FQN,
+                "project": f"projects/{LAKEBASE_PROJECT}",
+                "branch": f"projects/{LAKEBASE_PROJECT}/branches/production",
+                "primary_key_columns": [RETL_PK],
+                "scheduling_policy": "TRIGGERED",
+                "postgres_database": LAKEBASE_DB,
+                "create_database_objects_if_missing": True,
+            }
+        },
+    )
 
-    # Read all data from Delta
-    _, src_rows = query_dbsql(f"SELECT * FROM {RETL_FQN} ORDER BY {RETL_PK}")
+    # Extract status from the long-running operation response
+    response = res.get("response", {})
+    status = response.get("status", {})
+    state = status.get("detailed_state", "UNKNOWN")
+    message = status.get("message", "Synced table created")
 
-    # Insert into Lakebase
-    if src_rows:
-        conn = _get_pg_connection()
-        try:
-            with conn.cursor() as cur:
-                for row in src_rows:
-                    cur.execute(
-                        f"INSERT INTO {RETL_PG_TABLE} (id, report_date, region, total_policies, total_premium, avg_claim_amount) "
-                        f"VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
-                        (row["id"], row["report_date"], row["region"],
-                         row["total_policies"], row["total_premium"], row["avg_claim_amount"]),
-                    )
-                conn.commit()
-        finally:
-            conn.close()
-
-    _retl_state["target_exists"] = True
     elapsed = (time.time() - start) * 1000
     return {
         "status": "created",
         "elapsed_ms": round(elapsed, 2),
-        "message": f"Synced {len(src_rows)} rows from Delta to Lakebase in {elapsed/1000:.1f}s",
-    }
-
-
-@app.post("/api/retl/trigger-sync")
-async def retl_trigger_sync():
-    """Sync new rows from Delta to Lakebase (incremental upsert)."""
-    if not _retl_state["target_exists"] and not _check_retl_target():
-        raise HTTPException(400, "No target table in Lakebase. Create one first.")
-
-    start = time.time()
-
-    # Get max ID already in Lakebase
-    _, tgt_rows = query_lakebase(f"SELECT COALESCE(MAX(id), 0) AS max_id FROM {RETL_PG_TABLE}")
-    max_id = tgt_rows[0]["max_id"]
-
-    # Read new rows from Delta
-    _, new_rows = query_dbsql(
-        f"SELECT * FROM {RETL_FQN} WHERE id > {max_id} ORDER BY {RETL_PK}"
-    )
-
-    synced = 0
-    if new_rows:
-        conn = _get_pg_connection()
-        try:
-            with conn.cursor() as cur:
-                for row in new_rows:
-                    cur.execute(
-                        f"INSERT INTO {RETL_PG_TABLE} (id, report_date, region, total_policies, total_premium, avg_claim_amount) "
-                        f"VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (id) DO NOTHING",
-                        (row["id"], row["report_date"], row["region"],
-                         row["total_policies"], row["total_premium"], row["avg_claim_amount"]),
-                    )
-                conn.commit()
-                synced = len(new_rows)
-        finally:
-            conn.close()
-
-    elapsed = (time.time() - start) * 1000
-    return {
-        "success": True,
-        "elapsed_ms": round(elapsed, 2),
-        "synced_rows": synced,
-        "message": f"Synced {synced} new rows to Lakebase" if synced > 0 else "Already in sync — no new rows",
+        "state": state,
+        "message": f"Synced table created ({state}) in {elapsed/1000:.1f}s — {message}",
     }
 
 
 @app.post("/api/retl/delete-sync")
 async def retl_delete_sync():
-    """Drop the target table in Lakebase."""
-    if not _retl_state["target_exists"] and not _check_retl_target():
-        return {"status": "not_found", "message": "No target table in Lakebase"}
+    """Delete the synced table via the API, then drop the Postgres table."""
+    existing = _get_synced_table_status()
+    if not existing:
+        return {"status": "not_found", "message": "No synced table found"}
 
     start = time.time()
+
+    # Step 1: Delete the synced table from Unity Catalog (stops the pipeline)
+    _pg_do("DELETE", RETL_SYNCED_TABLE_RESOURCE)
+
+    # Step 2: Drop the Postgres table to free up space
     try:
         execute_lakebase(f"DROP TABLE IF EXISTS {RETL_PG_TABLE}")
-    except Exception as e:
-        raise HTTPException(500, f"Failed to drop table: {e}")
+    except Exception:
+        pass  # Table may not exist yet if sync was still provisioning
 
-    _retl_state["target_exists"] = False
     elapsed = (time.time() - start) * 1000
-    return {"status": "deleted", "elapsed_ms": round(elapsed, 2), "message": "Target table dropped from Lakebase"}
+    return {"status": "deleted", "elapsed_ms": round(elapsed, 2), "message": "Synced table deleted and Postgres table dropped"}
+
+
+@app.post("/api/retl/trigger-sync")
+async def retl_trigger_sync():
+    """Trigger a sync run on the pipeline backing the synced table."""
+    synced_info = _get_synced_table_status()
+    if not synced_info:
+        raise HTTPException(400, "No synced table found. Create one first.")
+
+    pipeline_id = synced_info.get("pipeline_id")
+    if not pipeline_id:
+        raise HTTPException(400, "Pipeline not yet provisioned. Wait for initial sync to complete.")
+
+    start = time.time()
+    w.pipelines.start_update(pipeline_id=pipeline_id)
+
+    elapsed = (time.time() - start) * 1000
+    return {
+        "success": True,
+        "elapsed_ms": round(elapsed, 2),
+        "message": f"Sync triggered on pipeline {pipeline_id}",
+    }
 
 
 @app.get("/api/retl/compare")
@@ -892,7 +906,8 @@ async def retl_compare(
 
     # Query target via psycopg
     tgt_cols, tgt_rows, tgt_total, tgt_ms = [], [], 0, 0.0
-    if _retl_state["target_exists"] or _check_retl_target():
+    synced_info = _get_synced_table_status()
+    if synced_info:
         try:
             start = time.time()
             _, tgt_count = query_lakebase(f"SELECT COUNT(*) AS cnt FROM {RETL_PG_TABLE}")

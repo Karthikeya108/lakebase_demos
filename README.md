@@ -35,14 +35,16 @@ The branch and its compute endpoint are created/discovered dynamically via the S
 
 ### 3. Reverse ETL
 
-Push data from Delta Lake to Lakebase Postgres and compare side by side:
+Sync Delta Lake data to Lakebase Postgres using the Synced Database Tables API and compare side by side:
 
-- **Sync**: Reads rows from a Delta table (`regional_summary`) via the DBSQL Statement API and writes them to Lakebase Postgres via psycopg3 with `ON CONFLICT DO NOTHING`
-- **Add rows**: Insert new rows into the Delta source table, then sync again to see them appear in Lakebase
+- **Create synced table**: Uses `w.database.create_synced_database_table()` to set up an automated Delta-to-Lakebase sync pipeline with triggered scheduling
+- **Pipeline status**: Real-time status display showing pipeline states (PROVISIONING, ONLINE, SYNCED) with auto-polling every 10 seconds during provisioning
+- **Add rows**: Insert new rows into the Delta source table — the sync pipeline picks them up automatically
 - **Side-by-side comparison**: View Delta (source) and Lakebase (destination) row counts and data together
+- **Delete synced table**: Clean removal via `w.database.delete_synced_database_table()` with `purge_data=True`
 - **Pagination**: 25 records per page with full navigation
 
-Uses a manual copy approach (DBSQL read + psycopg write) rather than synced tables, which are not yet supported on Azure.
+Uses the Databricks SDK's Synced Database Tables API (`w.database`) which manages a DLT pipeline internally for data synchronization.
 
 ### 4. Scale-to-Zero
 
@@ -146,7 +148,7 @@ Uses background threading with `concurrent.futures.ThreadPoolExecutor` to fire t
 - **Lakehouse**: Delta tables in Unity Catalog, queried via a Photon-enabled SQL warehouse
 - **Lakebase**: PostgreSQL 17 tables in Lakebase Autoscaling, queried via psycopg3 or the Data API
 - **Branching**: Copy-on-write database branches with isolated compute endpoints
-- **Reverse ETL**: Manual Delta-to-Postgres sync via DBSQL Statement API + psycopg3
+- **Reverse ETL**: Automated Delta-to-Postgres sync via Synced Database Tables API (`w.database`)
 - **Scale-to-Zero**: Compute lifecycle management via `w.postgres.update_endpoint()` with protobuf Duration
 - **Row-Level Security**: PostgreSQL RLS policies with `SET ROLE` persona switching
 - **Point-in-Time Restore**: Branch from any past timestamp via `source_branch_time` with protobuf Timestamp
