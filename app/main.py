@@ -381,6 +381,376 @@ async def update_record(request: Request, req: UpdateRequest, source: str = Quer
     return UpdateResponse(success=True, elapsed_ms=round(elapsed, 2), source=source)
 
 
+# --- Analytics Benchmark (OLTP vs OLAP) ---
+#
+# OLTP queries run on BOTH engines (same small dataset) to show Lakebase's
+# low-latency advantage for transactional patterns.
+#
+# OLAP queries run on DBSQL ONLY against a large 5M-row table that represents
+# historical data living in the Lakehouse — data that doesn't belong in an
+# operational database.
+
+OLAP_TABLE = "premium_transactions"
+OLAP_FQN = f"{UC_CATALOG}.{UC_SCHEMA}.{OLAP_TABLE}"
+
+ANALYTICS_QUERIES = [
+    # --- OLTP: Where Lakebase shines (run on both engines) ---
+    {
+        "id": "point_lookup",
+        "name": "Point Lookup",
+        "description": "Single-row fetch by primary key",
+        "category": "OLTP",
+        "section": "oltp",
+        "sql_template": "SELECT * FROM {prefix}agents WHERE agent_id = 42",
+    },
+    {
+        "id": "filtered_pagination",
+        "name": "Filtered Pagination",
+        "description": "Active high-premium policies (WHERE + ORDER BY + LIMIT)",
+        "category": "OLTP",
+        "section": "oltp",
+        "sql_template": (
+            "SELECT policy_id, policy_number, premium_amount, status, start_date "
+            "FROM {prefix}policies "
+            "WHERE status = 'ACTIVE' AND premium_amount > 3000 "
+            "ORDER BY premium_amount DESC LIMIT 20"
+        ),
+    },
+    {
+        "id": "small_aggregation",
+        "name": "Dashboard Summary",
+        "description": "Lightweight GROUP BY on 500-row agents table",
+        "category": "OLTP",
+        "section": "oltp",
+        "sql_template": (
+            "SELECT region, COUNT(*) AS agent_count "
+            "FROM {prefix}agents GROUP BY region ORDER BY agent_count DESC"
+        ),
+    },
+    # --- OLAP: Where Lakehouse shines (DBSQL only, 5M-row table) ---
+    {
+        "id": "monthly_revenue",
+        "name": "Monthly Revenue Trend",
+        "description": "Aggregate 5M transactions by year and month",
+        "category": "Full Scan",
+        "section": "olap",
+        "sql_template": (
+            "SELECT txn_year, txn_month, "
+            "COUNT(*) AS transactions, "
+            "ROUND(SUM(amount), 2) AS total_revenue, "
+            "ROUND(AVG(amount), 2) AS avg_amount "
+            "FROM {prefix}premium_transactions "
+            "GROUP BY txn_year, txn_month "
+            "ORDER BY txn_year, txn_month"
+        ),
+    },
+    {
+        "id": "channel_analysis",
+        "name": "Channel & Status Breakdown",
+        "description": "Multi-dimensional GROUP BY across 5M transactions",
+        "category": "Aggregation",
+        "section": "olap",
+        "sql_template": (
+            "SELECT channel, txn_status, payment_method, "
+            "COUNT(*) AS txn_count, "
+            "ROUND(SUM(amount), 2) AS total_amount, "
+            "ROUND(AVG(amount), 2) AS avg_amount "
+            "FROM {prefix}premium_transactions "
+            "GROUP BY channel, txn_status, payment_method "
+            "ORDER BY total_amount DESC"
+        ),
+    },
+    {
+        "id": "top_policies_revenue",
+        "name": "Top Policies by Lifetime Revenue",
+        "description": "JOIN 5M transactions with 100K policies, rank by revenue",
+        "category": "JOIN + Scan",
+        "section": "olap",
+        "sql_template": (
+            "SELECT p.policy_id, p.policy_number, p.status, "
+            "COUNT(*) AS transaction_count, "
+            "ROUND(SUM(t.amount), 2) AS total_revenue "
+            "FROM {prefix}premium_transactions t "
+            "JOIN {prefix}policies p ON t.policy_id = p.policy_id "
+            "GROUP BY p.policy_id, p.policy_number, p.status "
+            "ORDER BY total_revenue DESC LIMIT 20"
+        ),
+    },
+]
+
+
+def _serialize_rows(rows: list[dict]) -> list[dict]:
+    """Convert non-JSON-serializable types in query result rows."""
+    for row in rows:
+        for k, v in row.items():
+            if hasattr(v, "isoformat"):
+                row[k] = v.isoformat()
+            elif isinstance(v, Decimal):
+                row[k] = float(v)
+            elif isinstance(v, bytes):
+                row[k] = v.hex()
+    return rows
+
+
+def _dbsql_execute_and_wait(sql: str) -> None:
+    """Execute a DBSQL statement and wait for completion (for DDL/setup queries)."""
+    from databricks.sdk.service.sql import StatementState
+
+    resp = w.statement_execution.execute_statement(
+        warehouse_id=DBSQL_WAREHOUSE_ID,
+        statement=sql,
+        wait_timeout="50s",
+    )
+
+    if resp.status:
+        if resp.status.state == StatementState.FAILED:
+            raise HTTPException(500, f"DBSQL error: {resp.status.error.message if resp.status.error else 'Unknown'}")
+        if resp.status.state == StatementState.SUCCEEDED:
+            return
+
+    # Still running — poll until complete
+    stmt_id = resp.statement_id
+    for _ in range(30):
+        time.sleep(2)
+        poll = w.statement_execution.get_statement(stmt_id)
+        if poll.status.state == StatementState.SUCCEEDED:
+            return
+        if poll.status.state == StatementState.FAILED:
+            raise HTTPException(500, f"DBSQL error: {poll.status.error.message if poll.status.error else 'Unknown'}")
+
+    raise HTTPException(500, "Query timed out")
+
+
+@app.get("/api/analytics/queries")
+async def list_analytics_queries():
+    """List available benchmark queries with section info."""
+    return {"queries": [
+        {
+            "id": q["id"], "name": q["name"], "description": q["description"],
+            "category": q["category"], "section": q["section"],
+        }
+        for q in ANALYTICS_QUERIES
+    ]}
+
+
+@app.get("/api/analytics/olap-status")
+async def olap_table_status():
+    """Check if the 5M-row OLAP table exists in both engines."""
+    dbsql_count = 0
+    lakebase_count = 0
+    try:
+        _, rows = query_dbsql(f"SELECT COUNT(*) AS cnt FROM {OLAP_FQN}")
+        dbsql_count = rows[0]["cnt"]
+    except Exception:
+        pass
+    try:
+        _, rows = query_lakebase(f"SELECT COUNT(*) AS cnt FROM {LAKEBASE_SCHEMA}.{OLAP_TABLE}")
+        lakebase_count = rows[0]["cnt"]
+    except Exception:
+        pass
+    ready = dbsql_count > 0 and lakebase_count > 0
+    return {
+        "exists": ready,
+        "table": OLAP_FQN,
+        "row_count": dbsql_count,
+        "dbsql_count": dbsql_count,
+        "lakebase_count": lakebase_count,
+    }
+
+
+def _setup_lakebase_olap_table() -> int:
+    """Create and populate premium_transactions in Lakebase via generate_series."""
+    schema_table = f"{LAKEBASE_SCHEMA}.{OLAP_TABLE}"
+    premiums_table = f"{LAKEBASE_SCHEMA}.premiums"
+
+    conn = _get_pg_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""
+                CREATE TABLE IF NOT EXISTS {schema_table} (
+                    txn_id BIGINT PRIMARY KEY,
+                    policy_id INT NOT NULL,
+                    amount NUMERIC(12,2) NOT NULL,
+                    transaction_date DATE,
+                    txn_year INT,
+                    txn_month INT,
+                    txn_status TEXT,
+                    payment_method TEXT,
+                    channel TEXT
+                )
+            """)
+            conn.commit()
+
+            cur.execute(f"SELECT COUNT(*) FROM {schema_table}")
+            if cur.fetchone()[0] > 0:
+                cur.execute(f"SELECT COUNT(*) FROM {schema_table}")
+                return cur.fetchone()[0]
+
+            # Populate in batches of 500K rows (5 periods each) to keep transactions manageable
+            for batch_start in range(0, 50, 5):
+                batch_end = batch_start + 4
+                cur.execute(f"""
+                    INSERT INTO {schema_table}
+                    SELECT
+                      CAST(p.premium_id AS BIGINT) * 50 + s.n,
+                      p.policy_id,
+                      ROUND((p.amount * (1.0 + (RANDOM() * 0.3 - 0.15)))::numeric, 2),
+                      p.due_date + (s.n * 30),
+                      EXTRACT(YEAR FROM p.due_date + (s.n * 30))::int,
+                      EXTRACT(MONTH FROM p.due_date + (s.n * 30))::int,
+                      CASE WHEN RANDOM() > 0.08 THEN 'COMPLETED'
+                           WHEN RANDOM() > 0.5 THEN 'PENDING'
+                           ELSE 'FAILED' END,
+                      p.payment_method,
+                      CASE WHEN RANDOM() > 0.7 THEN 'online'
+                           WHEN RANDOM() > 0.4 THEN 'mobile'
+                           ELSE 'branch' END
+                    FROM {premiums_table} p
+                    CROSS JOIN generate_series({batch_start}, {batch_end}) AS s(n)
+                """)
+                conn.commit()
+
+            cur.execute(f"SELECT COUNT(*) FROM {schema_table}")
+            return cur.fetchone()[0]
+    finally:
+        conn.close()
+
+
+@app.post("/api/analytics/setup-olap")
+async def setup_olap_table():
+    """Generate the 5M-row premium_transactions table in both DBSQL and Lakebase."""
+    # Check if both already exist
+    dbsql_count = 0
+    lb_count = 0
+    try:
+        _, rows = query_dbsql(f"SELECT COUNT(*) AS cnt FROM {OLAP_FQN}")
+        dbsql_count = rows[0]["cnt"]
+    except Exception:
+        pass
+    try:
+        _, rows = query_lakebase(f"SELECT COUNT(*) AS cnt FROM {LAKEBASE_SCHEMA}.{OLAP_TABLE}")
+        lb_count = rows[0]["cnt"]
+    except Exception:
+        pass
+
+    if dbsql_count > 0 and lb_count > 0:
+        return {
+            "status": "exists",
+            "table": OLAP_FQN,
+            "row_count": dbsql_count,
+            "dbsql_count": dbsql_count,
+            "lakebase_count": lb_count,
+        }
+
+    start = time.time()
+    premiums_fqn = f"{UC_CATALOG}.{UC_SCHEMA}.premiums"
+
+    # Step 1: Create in DBSQL (if needed)
+    if dbsql_count == 0:
+        _dbsql_execute_and_wait(f"""
+            CREATE TABLE IF NOT EXISTS {OLAP_FQN}
+            AS
+            SELECT
+              CAST(p.premium_id AS BIGINT) * 50 + CAST(m.month_idx AS BIGINT) AS txn_id,
+              p.policy_id,
+              ROUND(p.amount * (1.0 + (RAND() * 0.3 - 0.15)), 2) AS amount,
+              DATE_ADD(p.due_date, CAST(m.month_idx * 30 AS INT)) AS transaction_date,
+              YEAR(DATE_ADD(p.due_date, CAST(m.month_idx * 30 AS INT))) AS txn_year,
+              MONTH(DATE_ADD(p.due_date, CAST(m.month_idx * 30 AS INT))) AS txn_month,
+              CASE
+                WHEN RAND() > 0.08 THEN 'COMPLETED'
+                WHEN RAND() > 0.5 THEN 'PENDING'
+                ELSE 'FAILED'
+              END AS txn_status,
+              p.payment_method,
+              CASE
+                WHEN RAND() > 0.7 THEN 'online'
+                WHEN RAND() > 0.4 THEN 'mobile'
+                ELSE 'branch'
+              END AS channel
+            FROM {premiums_fqn} p
+            CROSS JOIN (SELECT EXPLODE(SEQUENCE(0, 49)) AS month_idx) m
+        """)
+        _, rows = query_dbsql(f"SELECT COUNT(*) AS cnt FROM {OLAP_FQN}")
+        dbsql_count = rows[0]["cnt"]
+
+    # Step 2: Create in Lakebase (if needed)
+    if lb_count == 0:
+        lb_count = _setup_lakebase_olap_table()
+
+    elapsed = (time.time() - start) * 1000
+
+    return {
+        "status": "created",
+        "table": OLAP_FQN,
+        "row_count": dbsql_count,
+        "dbsql_count": dbsql_count,
+        "lakebase_count": lb_count,
+        "elapsed_ms": round(elapsed, 1),
+    }
+
+
+@app.post("/api/analytics/run")
+async def run_analytics_query(query_id: str = Query(...)):
+    """Run a benchmark query on both DBSQL and Lakebase, returning timing and results."""
+    query = next((q for q in ANALYTICS_QUERIES if q["id"] == query_id), None)
+    if not query:
+        raise HTTPException(404, f"Query '{query_id}' not found")
+
+    template = query["sql_template"]
+    section = query["section"]
+    results = {}
+
+    # Run on DBSQL
+    dbsql_sql = template.format(prefix=f"{UC_CATALOG}.{UC_SCHEMA}.")
+    try:
+        start = time.time()
+        cols, rows = query_dbsql(dbsql_sql)
+        elapsed = (time.time() - start) * 1000
+        results["dbsql"] = {
+            "sql": dbsql_sql.strip(),
+            "columns": cols,
+            "rows": _serialize_rows(rows)[:50],
+            "row_count": len(rows),
+            "elapsed_ms": round(elapsed, 1),
+            "error": None,
+        }
+    except Exception as e:
+        results["dbsql"] = {
+            "sql": dbsql_sql.strip(), "columns": [], "rows": [],
+            "row_count": 0, "elapsed_ms": 0, "error": str(e),
+        }
+
+    # Run on Lakebase
+    lb_sql = template.format(prefix=f"{LAKEBASE_SCHEMA}.")
+    try:
+        start = time.time()
+        cols, rows = query_lakebase(lb_sql)
+        elapsed = (time.time() - start) * 1000
+        results["lakebase"] = {
+            "sql": lb_sql.strip(),
+            "columns": cols,
+            "rows": _serialize_rows(rows)[:50],
+            "row_count": len(rows),
+            "elapsed_ms": round(elapsed, 1),
+            "error": None,
+        }
+    except Exception as e:
+        results["lakebase"] = {
+            "sql": lb_sql.strip(), "columns": [], "rows": [],
+            "row_count": 0, "elapsed_ms": 0, "error": str(e),
+        }
+
+    return {
+        "query_id": query_id,
+        "name": query["name"],
+        "description": query["description"],
+        "category": query["category"],
+        "section": section,
+        "results": results,
+    }
+
+
 # --- Branching Demo ---
 
 LAKEBASE_PROJECT = LAKEBASE_ENDPOINT.split("/")[1]  # e.g. "tko-2026-demo"

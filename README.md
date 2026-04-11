@@ -18,9 +18,19 @@ Compare performance across four data access methods side by side, using an insur
 | **Lakebase Data API** | Lakebase | REST (PostgREST) | RESTful HTTP interface with OAuth |
 
 Features:
-- Browse all 10 tables with paginated data view (10 records per page)
-- Inline cell editing (double-click to edit, Enter to save)
-- Prominent response time display comparing all four access methods
+- **Table Browser**: Browse all 10 tables with paginated data view (10 records per page), inline cell editing (double-click to edit, Enter to save), and prominent response time display comparing all four access methods
+- **Analytics Benchmark (OLTP vs OLAP)**: Demonstrates where each engine excels by running queries on both DBSQL and Lakebase with visual bar-chart comparison:
+  - **OLTP Workload** (Lakebase's sweet spot) — transactional queries against the operational dataset (~570K rows):
+    - Point Lookup — single-row fetch by primary key
+    - Filtered Pagination — active high-premium policies with WHERE + ORDER BY + LIMIT
+    - Dashboard Summary — lightweight GROUP BY on 500-row agents table
+  - **OLAP Workload** (Lakehouse's sweet spot) — analytical queries against a 5M-row `premium_transactions` table generated in both engines (100K premiums × 50 time periods):
+    - Monthly Revenue Trend — full-table GROUP BY year/month across 5M rows
+    - Channel & Status Breakdown — multi-dimensional aggregation across 5M rows
+    - Top Policies by Lifetime Revenue — JOIN 5M transactions with 100K policies
+  - One-click "Generate Table" setup creates the 5M-row OLAP dataset in both Unity Catalog (via `CTAS` + `EXPLODE(SEQUENCE)`) and Lakebase (via `INSERT...SELECT` + `generate_series`)
+  - Per-section summary showing average times, speedup multiplier, and winner
+  - Expandable SQL and result previews for each query
 
 ### 2. Branching Workflows
 
