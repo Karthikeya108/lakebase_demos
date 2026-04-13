@@ -701,11 +701,11 @@ async def run_analytics_query(query_id: str = Query(...)):
     section = query["section"]
     results = {}
 
-    # Run on DBSQL
+    # Run on DBSQL via Connector (Thrift/JDBC) for fair wire-protocol comparison
     dbsql_sql = template.format(prefix=f"{UC_CATALOG}.{UC_SCHEMA}.")
     try:
         start = time.time()
-        cols, rows = query_dbsql(dbsql_sql)
+        cols, rows = query_dbsql_connector(dbsql_sql)
         elapsed = (time.time() - start) * 1000
         results["dbsql"] = {
             "sql": dbsql_sql.strip(),

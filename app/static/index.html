@@ -636,7 +636,7 @@
       result.innerHTML = `
         <div class="space-y-2.5 mb-3">
           <div class="flex items-center gap-3">
-            <span class="w-20 text-sm font-medium text-blue-700 shrink-0">DBSQL</span>
+            <span class="w-20 text-sm font-medium text-blue-700 shrink-0">DBSQL (JDBC)</span>
             <div class="flex-1 bg-gray-100 rounded-full h-7 overflow-hidden">
               <div class="h-full bg-blue-500 rounded-full transition-all duration-700 ease-out" style="width: ${dbsqlPct}%"></div>
             </div>
@@ -644,7 +644,7 @@
           </div>
           ${lb ? `
           <div class="flex items-center gap-3">
-            <span class="w-20 text-sm font-medium text-green-700 shrink-0">Lakebase</span>
+            <span class="w-20 text-sm font-medium text-green-700 shrink-0">Lakebase (PG)</span>
             <div class="flex-1 bg-gray-100 rounded-full h-7 overflow-hidden">
               <div class="h-full bg-green-500 rounded-full transition-all duration-700 ease-out" style="width: ${lbPct}%"></div>
             </div>
@@ -662,8 +662,8 @@
           </div>
         </div>
         <div id="sql-${queryId}" class="hidden mt-3 space-y-2">
-          <div><div class="text-xs font-medium text-blue-700 mb-1">DBSQL:</div><pre class="text-xs font-mono bg-blue-50 p-3 rounded overflow-x-auto whitespace-pre-wrap">${escapeHtml(dbsql.sql)}</pre></div>
-          ${lb ? `<div><div class="text-xs font-medium text-green-700 mb-1">Lakebase:</div><pre class="text-xs font-mono bg-green-50 p-3 rounded overflow-x-auto whitespace-pre-wrap">${escapeHtml(lb.sql)}</pre></div>` : ''}
+          <div><div class="text-xs font-medium text-blue-700 mb-1">DBSQL (JDBC):</div><pre class="text-xs font-mono bg-blue-50 p-3 rounded overflow-x-auto whitespace-pre-wrap">${escapeHtml(dbsql.sql)}</pre></div>
+          ${lb ? `<div><div class="text-xs font-medium text-green-700 mb-1">Lakebase (PG):</div><pre class="text-xs font-mono bg-green-50 p-3 rounded overflow-x-auto whitespace-pre-wrap">${escapeHtml(lb.sql)}</pre></div>` : ''}
         </div>
         <div id="results-${queryId}" class="hidden mt-3 overflow-x-auto">${renderResultTable((lb && lb.columns.length) ? lb : dbsql)}</div>
       `;
