@@ -71,55 +71,40 @@ print(f"App SP Client ID: {sp_client_id}")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Create Lakebase OAuth Role for SP
+# MAGIC ## Grant CAN_MANAGE on Lakebase Project to App SP
+# MAGIC
+# MAGIC The branching demo needs to create/delete branches via the Lakebase
+# MAGIC Postgres API, which requires CAN_MANAGE on the database project. This
+# MAGIC isn't a supported App resource type, so we set it via the Permissions API.
 
 # COMMAND ----------
 
-from databricks.sdk.service.postgres import (
-    Role, RoleRoleSpec, RoleAuthMethod, RoleIdentityType
-)
+from databricks.sdk.service import iam
 
-existing_roles = list(w.postgres.list_roles(
-    parent=f"projects/{project_name}/branches/production"
-))
-
-sp_role_exists = False
-for role in existing_roles:
-    if (hasattr(role, 'status') and role.status
-        and getattr(role.status, 'postgres_role', None) == sp_client_id
-        and getattr(role.status, 'auth_method', None) == RoleAuthMethod.LAKEBASE_OAUTH_V1):
-        print(f"OAuth role already exists for SP: {role.name}")
-        sp_role_exists = True
-        break
-
-if not sp_role_exists:
-    # Clean up any stale NO_LOGIN roles for this SP
-    for role in existing_roles:
-        if (hasattr(role, 'status') and role.status
-            and getattr(role.status, 'postgres_role', None) == sp_client_id):
-            print(f"Deleting stale role: {role.name}")
-            w.postgres.delete_role(name=role.name).wait()
-
-    print(f"Creating Lakebase OAuth role for SP: {sp_client_id}")
-    op = w.postgres.create_role(
-        parent=f"projects/{project_name}/branches/production",
-        role=Role(
-            spec=RoleRoleSpec(
-                auth_method=RoleAuthMethod.LAKEBASE_OAUTH_V1,
-                identity_type=RoleIdentityType.SERVICE_PRINCIPAL,
-                postgres_role=sp_client_id,
-            )
+w.permissions.set(
+    request_object_type="database-projects",
+    request_object_id=project_name,
+    access_control_list=[
+        iam.AccessControlRequest(
+            service_principal_name=sp_client_id,
+            permission_level=iam.PermissionLevel.CAN_MANAGE,
         ),
-        role_id=f"sp-{app_name}",
-    )
-    result = op.wait()
-    print(f"Created role: {result.name}")
-    print(f"  Auth: {result.status.auth_method}, Identity: {result.status.identity_type}")
+    ],
+)
+print(f"Granted CAN_MANAGE on Lakebase project '{project_name}' to SP {sp_client_id}")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Grant Schema and Table Access to SP
+# MAGIC ## Set Up the SP's Postgres Role and Grants
+# MAGIC
+# MAGIC Create the SP's Lakebase OAuth role via the `databricks_auth` SQL
+# MAGIC helper, grant it membership in `authenticator` so the Data API can
+# MAGIC impersonate it, and grant it schema/table access.
+# MAGIC
+# MAGIC These statements run via psycopg under the executor's identity. The
+# MAGIC executor is the role's admin, which is required to subsequently
+# MAGIC `GRANT "<sp>" TO authenticator`.
 
 # COMMAND ----------
 
@@ -141,7 +126,24 @@ conn = psycopg.connect(
 conn.autocommit = True
 cur = conn.cursor()
 
-cur.execute(f'GRANT USAGE ON SCHEMA lakebase_demo TO "{sp_client_id}"')
+cur.execute("CREATE EXTENSION IF NOT EXISTS databricks_auth")
+
+# Create the SP role only if it doesn't already exist. Skips quietly on re-runs.
+cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (sp_client_id,))
+if not cur.fetchone():
+    cur.execute(
+        "SELECT databricks_create_role(%s, 'SERVICE_PRINCIPAL')",
+        (sp_client_id,),
+    )
+    print(f"Created Lakebase OAuth role for SP: {sp_client_id}")
+else:
+    print(f"OAuth role already exists for SP: {sp_client_id}")
+
+# Allow the Data API's `authenticator` role to impersonate the SP.
+cur.execute(f'GRANT "{sp_client_id}" TO authenticator')
+
+# Schema/table grants
+cur.execute(f'GRANT USAGE, CREATE ON SCHEMA lakebase_demo TO "{sp_client_id}"')
 cur.execute(f'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA lakebase_demo TO "{sp_client_id}"')
 cur.execute(f'ALTER DEFAULT PRIVILEGES IN SCHEMA lakebase_demo GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "{sp_client_id}"')
 
@@ -150,6 +152,40 @@ print(f"Granted full access on lakebase_demo to SP: {sp_client_id}")
 cur.execute("SELECT rolname, rolcanlogin FROM pg_roles WHERE rolname = %s", (sp_client_id,))
 print(f"Postgres role: {cur.fetchone()}")
 conn.close()
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Grant Unity Catalog Access to App SP
+# MAGIC
+# MAGIC The app SP needs to read/write Delta tables via DBSQL. UC SCHEMA is NOT a
+# MAGIC supported App resource securable type, so we issue these grants via SQL
+# MAGIC instead. Requires the executor to have grant authority on the catalog.
+
+# COMMAND ----------
+
+uc_grants = [
+    f"GRANT USE CATALOG ON CATALOG `{catalog}` TO `{sp_client_id}`",
+    f"GRANT USE SCHEMA ON SCHEMA `{catalog}`.`{schema}` TO `{sp_client_id}`",
+    f"GRANT SELECT ON SCHEMA `{catalog}`.`{schema}` TO `{sp_client_id}`",
+    # Required for the OLAP benchmark which CREATEs `premium_transactions`
+    f"GRANT CREATE TABLE ON SCHEMA `{catalog}`.`{schema}` TO `{sp_client_id}`",
+    f"GRANT MODIFY ON SCHEMA `{catalog}`.`{schema}` TO `{sp_client_id}`",
+]
+for stmt in uc_grants:
+    try:
+        resp = w.statement_execution.execute_statement(
+            warehouse_id=warehouse_id, statement=stmt, wait_timeout="30s"
+        )
+        state = resp.status.state.value if resp.status and resp.status.state else "?"
+        if state != "SUCCEEDED":
+            err = resp.status.error.message if resp.status and resp.status.error else "unknown"
+            print(f"  WARN: {stmt} -> {state}: {err}")
+        else:
+            print(f"  OK: {stmt}")
+    except Exception as e:
+        print(f"  FAILED: {stmt} -> {e}")
+        print(f"  If the executor lacks grant authority, ask your catalog admin to run the above.")
 
 # COMMAND ----------
 
@@ -215,6 +251,39 @@ if source_code_path:
         overwrite=True,
     )
     print(f"Updated app.yaml at {source_code_path}/app.yaml")
+
+    # Update the App's `resources` field so the platform auto-grants the SP
+    # CAN_USE on the SQL warehouse. Done as an additive update — any
+    # other resources the user has attached to the app via the UI (serving
+    # endpoints, secrets, etc.) are preserved; we replace just the entry
+    # named "sql-warehouse". (UC SCHEMA isn't a supported App resource
+    # securable type — only TABLE/VOLUME/FUNCTION/CONNECTION — so we don't
+    # declare it here. UC table grants for the SP are issued separately above.)
+    print("Updating app resources (warehouse CAN_USE)...")
+    from databricks.sdk.service.apps import (
+        App,
+        AppResource,
+        AppResourceSqlWarehouse,
+        AppResourceSqlWarehouseSqlWarehousePermission,
+    )
+    existing_resources = list(app_config.resources or [])
+    other_resources = [r for r in existing_resources if r.name != "sql-warehouse"]
+    new_resources = other_resources + [
+        AppResource(
+            name="sql-warehouse",
+            description="DBSQL warehouse for Lakehouse queries",
+            sql_warehouse=AppResourceSqlWarehouse(
+                id=warehouse_id,
+                permission=AppResourceSqlWarehouseSqlWarehousePermission.CAN_USE,
+            ),
+        ),
+    ]
+    w.apps.create_update(
+        app_name=app_name,
+        update_mask="resources",
+        app=App(name=app_name, resources=new_resources),
+    ).result()
+    print(f"App resources updated ({len(other_resources)} preserved + 1 sql-warehouse).")
 
     # Redeploy the app with updated config
     print("Redeploying app with updated configuration...")

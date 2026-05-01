@@ -241,44 +241,17 @@ databricks bundle run lakebase_demos_app -p <profile>
 databricks bundle run setup_lakebase_demos -p <profile>
 ```
 
-### Post-Deploy: Lakebase Data API Setup
+### Post-Deploy: Enable the Lakebase Data API
 
-The Data API requires additional manual steps after the setup job completes:
+The setup job creates the SP's Lakebase OAuth role and grants it to `authenticator` automatically (notebook 03). But two Data API knobs aren't exposed via API and have to be flipped in the Lakebase UI:
 
-1. **Enable the Data API** in the Lakebase UI:
-   - Navigate to your Lakebase project > Data API
-   - Click **Enable Data API**
+1. **Enable the Data API** — Lakebase project → **Data API** → **Enable Data API**.
+2. **Expose the `lakebase_demo` schema** — same page → **Settings** → **Advanced settings** → **Exposed schemas** → add `lakebase_demo` → **Save**.
+3. **Refresh the schema cache** on the Data API page.
 
-2. **Expose the `lakebase_demo` schema**:
-   - On the Data API page, go to **Settings** > **Advanced settings**
-   - Under **Exposed schemas**, add `lakebase_demo`
-   - Click **Save**
+The app will then be able to query Lakebase via the Data API source.
 
-3. **Create the SP role for Data API access** (run in the Lakebase SQL Editor):
-   ```sql
-   -- Create the SP role using the databricks_auth extension
-   CREATE EXTENSION IF NOT EXISTS databricks_auth;
-   SELECT databricks_create_role('<app-sp-client-id>', 'SERVICE_PRINCIPAL');
-
-   -- Grant the SP role to the authenticator (required for Data API)
-   GRANT "<app-sp-client-id>" TO authenticator;
-
-   -- Grant schema and table access
-   GRANT USAGE ON SCHEMA lakebase_demo TO "<app-sp-client-id>";
-   GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA lakebase_demo TO "<app-sp-client-id>";
-   ```
-
-   Replace `<app-sp-client-id>` with the app's service principal client ID (found via the Databricks Apps UI or `databricks apps get <app-name>`).
-
-4. **Refresh the schema cache** in the Data API page after granting permissions.
-
-5. **Update `LAKEBASE_DATA_API_URL`** in `app.yaml`:
-   ```
-   https://<lakebase-host>/api/2.0/workspace/<workspace-id>/rest/<database-name>
-   ```
-   Then redeploy the app: `databricks bundle deploy && databricks bundle run lakebase_demos_app`
-
-> **Important**: The database owner (whoever created the Lakebase project) cannot use the Data API directly. The `authenticator` role cannot assume owner privileges. The app uses the service principal's token instead.
+> **Note**: The database owner (whoever created the Lakebase project) cannot use the Data API directly — the `authenticator` role can't assume owner privileges. That's why the app authenticates as a service principal instead.
 
 ### What the Setup Job Does
 
