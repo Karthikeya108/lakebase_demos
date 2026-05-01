@@ -11,8 +11,8 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("lakebase_project", "tko-2026-demo")
-dbutils.widgets.text("lakebase_db", "tko_2026_demo")
+dbutils.widgets.text("lakebase_project", "lakebase-demos")
+dbutils.widgets.text("lakebase_db", "lakebase_demos")
 
 project_name = dbutils.widgets.get("lakebase_project")
 lakebase_db = dbutils.widgets.get("lakebase_db")

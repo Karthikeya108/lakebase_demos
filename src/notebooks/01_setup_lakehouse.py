@@ -1,12 +1,12 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # Step 1: Setup Lakehouse (Unity Catalog Delta Tables)
-# MAGIC Creates a SQL warehouse, UC catalog/schema, and 10 insurance tables with ~570K total records.
+# MAGIC Creates a SQL warehouse, UC catalog/schema, and 10 demo tables with ~570K total records.
 # MAGIC All resources are created under the identity of the executor.
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog", "tko_2026")
+dbutils.widgets.text("catalog", "lakebase_demos")
 dbutils.widgets.text("schema", "lakebase_demo")
 
 catalog = dbutils.widgets.get("catalog")
@@ -27,7 +27,7 @@ w = WorkspaceClient()
 me = w.current_user.me()
 print(f"Running as: {me.user_name}")
 
-warehouse_name = f"tko-2026-warehouse"
+warehouse_name = f"lakebase-demos-warehouse"
 warehouse_id = None
 
 # Check for existing warehouse
