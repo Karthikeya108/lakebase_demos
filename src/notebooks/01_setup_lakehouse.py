@@ -22,6 +22,7 @@ print(f"Setting up {catalog}.{schema}")
 # COMMAND ----------
 
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.sql import EndpointInfoWarehouseType
 
 w = WorkspaceClient()
 me = w.current_user.me()
@@ -38,15 +39,15 @@ for wh in w.warehouses.list():
         break
 
 if not warehouse_id:
-    print(f"Creating SQL warehouse: {warehouse_name}")
+    print(f"Creating serverless SQL warehouse: {warehouse_name}")
     wh = w.warehouses.create(
         name=warehouse_name,
         cluster_size="Small",
         max_num_clusters=1,
         auto_stop_mins=10,
         enable_photon=True,
-        warehouse_type="PRO",
-        spot_instance_policy="COST_OPTIMIZED",
+        enable_serverless_compute=True,
+        warehouse_type=EndpointInfoWarehouseType.PRO,
     ).result()
     warehouse_id = wh.id
     print(f"Created warehouse: {warehouse_name} ({warehouse_id})")

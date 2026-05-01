@@ -10,15 +10,6 @@ resources:
             base_parameters:
               catalog: ${var.catalog}
               schema: ${var.schema}
-          new_cluster:
-            spark_version: "16.2.x-scala2.12"
-            node_type_id: "Standard_D4ds_v5"
-            num_workers: 0
-            spark_conf:
-              "spark.master": "local[*, 4]"
-              "spark.databricks.cluster.profile": "singleNode"
-            custom_tags:
-              "ResourceClass": "SingleNode"
 
         - task_key: "02_setup_lakebase"
           description: "Create Lakebase project, database, schema, and populate tables"
@@ -29,15 +20,6 @@ resources:
             base_parameters:
               lakebase_project: ${var.lakebase_project}
               lakebase_db: ${var.lakebase_db}
-          new_cluster:
-            spark_version: "16.2.x-scala2.12"
-            node_type_id: "Standard_D4ds_v5"
-            num_workers: 0
-            spark_conf:
-              "spark.master": "local[*, 4]"
-              "spark.databricks.cluster.profile": "singleNode"
-            custom_tags:
-              "ResourceClass": "SingleNode"
 
         - task_key: "03_configure_app"
           description: "Create Lakebase role for app SP, grant access, and configure app env vars"
@@ -51,12 +33,3 @@ resources:
               lakebase_project: ${var.lakebase_project}
               lakebase_db: ${var.lakebase_db}
               app_name: ${resources.apps.lakebase_demos_app.name}
-          new_cluster:
-            spark_version: "16.2.x-scala2.12"
-            node_type_id: "Standard_D4ds_v5"
-            num_workers: 0
-            spark_conf:
-              "spark.master": "local[*, 4]"
-              "spark.databricks.cluster.profile": "singleNode"
-            custom_tags:
-              "ResourceClass": "SingleNode"
