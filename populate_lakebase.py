@@ -1,11 +1,11 @@
 #!/usr/bin/env python3.10
-"""Populate Lakebase Postgres with insurance demo data matching the UC tables."""
+"""Populate Lakebase Postgres with demo data matching the UC tables."""
 import subprocess, json, psycopg, socket
 
 def get_connection():
     result = subprocess.run(
         ["databricks", "postgres", "generate-database-credential",
-         "projects/tko-2026-demo/branches/production/endpoints/primary",
+         "projects/lakebase-demos/branches/production/endpoints/primary",
          "-o", "json"], capture_output=True, text=True)
     token = json.loads(result.stdout)["token"]
     result2 = subprocess.run(
@@ -17,7 +17,7 @@ def get_connection():
     except:
         r = subprocess.run(["dig", "+short", host], capture_output=True, text=True)
         ip = r.stdout.strip().split('\n')[-1]
-    return psycopg.connect(host=host, hostaddr=ip, dbname="tko_2026_demo",
+    return psycopg.connect(host=host, hostaddr=ip, dbname="lakebase_demos",
                            user=username, password=token, sslmode="require")
 
 def create_tables(conn):
@@ -189,7 +189,7 @@ def gen_claim_payments():
                date(2019,3,1)+timedelta(days=i%2100), types[i%3], st[i%4], notes[i%5])
 
 if __name__ == "__main__":
-    print("Connecting to Lakebase (tko_2026_demo)...")
+    print("Connecting to Lakebase (lakebase_demos)...")
     conn = get_connection()
     print("Creating tables...")
     create_tables(conn)

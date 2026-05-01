@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from databricks.sdk import WorkspaceClient
 
-app = FastAPI(title="Insurance Data Explorer")
+app = FastAPI(title="Lakebase Demos")
 w = WorkspaceClient()
 
 # Config - all values set by the setup job via app.yaml env vars
@@ -753,7 +753,7 @@ async def run_analytics_query(query_id: str = Query(...)):
 
 # --- Branching Demo ---
 
-LAKEBASE_PROJECT = LAKEBASE_ENDPOINT.split("/")[1]  # e.g. "tko-2026-demo"
+LAKEBASE_PROJECT = LAKEBASE_ENDPOINT.split("/")[1]  # e.g. "lakebase-demos"
 BRANCH_ID = "dev-demo"
 BRANCH_NAME = f"projects/{LAKEBASE_PROJECT}/branches/{BRANCH_ID}"
 
