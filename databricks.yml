@@ -1,18 +1,18 @@
 bundle:
-  name: tko-2026-insurance-demo
+  name: lakebase-demos
 
 include:
   - resources/*.yml
 
 variables:
   catalog:
-    default: "tko_2026"
+    default: "lakebase_demos"
   schema:
     default: "lakebase_demo"
   lakebase_project:
-    default: "tko-2026-demo"
+    default: "lakebase-demos"
   lakebase_db:
-    default: "tko_2026_demo"
+    default: "lakebase_demos"
 targets:
   dev:
     default: true

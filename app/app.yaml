@@ -12,12 +12,12 @@ env:
   - name: LAKEBASE_HOST
     value: "ep-old-rice-ean8eftx.database.northeurope.azuredatabricks.net"
   - name: LAKEBASE_DB
-    value: "tko_2026_demo"
+    value: "lakebase_demos"
   - name: LAKEBASE_ENDPOINT
-    value: "projects/tko-2026-demo/branches/production/endpoints/primary"
+    value: "projects/lakebase-demos/branches/production/endpoints/primary"
   - name: UC_CATALOG
-    value: "tko_2026"
+    value: "lakebase_demos"
   - name: UC_SCHEMA
     value: "lakebase_demo"
   - name: LAKEBASE_DATA_API_URL
-    value: "https://ep-old-rice-ean8eftx.database.northeurope.azuredatabricks.net/api/2.0/workspace/4116661263058619/rest/tko_2026_demo"
+    value: "https://ep-old-rice-ean8eftx.database.northeurope.azuredatabricks.net/api/2.0/workspace/4116661263058619/rest/lakebase_demos"

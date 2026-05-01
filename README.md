@@ -185,10 +185,10 @@ Uses background threading with `concurrent.futures.ThreadPoolExecutor` to fire t
 ## Project Structure
 
 ```
-tko_2026/
+lakebase_demos/
 ├── databricks.yml                    # DABs main config (variables, targets)
 ├── resources/
-│   ├── insurance_app.app.yml         # Databricks App resource definition
+│   ├── lakebase_demos_app.app.yml    # Databricks App resource definition
 │   └── setup_job.yml                 # 3-task setup job definition
 ├── src/notebooks/
 │   ├── 01_setup_lakehouse.py         # Creates SQL warehouse + UC catalog/schema + Delta tables
@@ -232,10 +232,10 @@ databricks bundle validate
 databricks bundle deploy
 
 # 3. Deploy and start the app (creates it with placeholder config)
-databricks bundle run insurance_app
+databricks bundle run lakebase_demos_app
 
 # 4. Run the setup job (creates all infrastructure, data, and configures the app)
-databricks bundle run setup_insurance_demo
+databricks bundle run setup_lakebase_demos
 ```
 
 ### Post-Deploy: Lakebase Data API Setup
@@ -273,7 +273,7 @@ The Data API requires additional manual steps after the setup job completes:
    ```
    https://<lakebase-host>/api/2.0/workspace/<workspace-id>/rest/<database-name>
    ```
-   Then redeploy the app: `databricks bundle deploy && databricks bundle run insurance_app`
+   Then redeploy the app: `databricks bundle deploy && databricks bundle run lakebase_demos_app`
 
 > **Important**: The database owner (whoever created the Lakebase project) cannot use the Data API directly. The `authenticator` role cannot assume owner privileges. The app uses the service principal's token instead.
 
@@ -295,10 +295,10 @@ Defined in `databricks.yml`, overridable per target or at deploy time:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `catalog` | `tko_2026` | Unity Catalog catalog name |
+| `catalog` | `lakebase_demos` | Unity Catalog catalog name |
 | `schema` | `lakebase_demo` | UC schema name |
-| `lakebase_project` | `tko-2026-demo` | Lakebase Autoscaling project name |
-| `lakebase_db` | `tko_2026_demo` | Lakebase Postgres database name |
+| `lakebase_project` | `lakebase-demos` | Lakebase Autoscaling project name |
+| `lakebase_db` | `lakebase_demos` | Lakebase Postgres database name |
 
 Override at deploy time:
 
@@ -314,8 +314,8 @@ databricks bundle deploy -var="catalog=my_catalog" -var="lakebase_project=my-pro
 ```bash
 # Deploy to prod
 databricks bundle deploy -t prod
-databricks bundle run insurance_app -t prod
-databricks bundle run setup_insurance_demo -t prod
+databricks bundle run lakebase_demos_app -t prod
+databricks bundle run setup_lakebase_demos -t prod
 ```
 
 ## Branching Demo Details
@@ -334,7 +334,7 @@ Branch actions modify data only on the branch, leaving production untouched. The
 
 The Lakebase Data API uses a PostgREST-compatible REST interface. Key details:
 
-- **URL format**: `{REST_ENDPOINT}/{schema}/{table}` (e.g., `.../rest/tko_2026_demo/lakebase_demo/policy_types`)
+- **URL format**: `{REST_ENDPOINT}/{schema}/{table}` (e.g., `.../rest/lakebase_demos/lakebase_demo/policy_types`)
 - **Authentication**: OAuth bearer token in the `Authorization` header
 - **Pagination**: `?limit=N&offset=M` query parameters; use `Prefer: count=exact` header for total counts
 - **Filtering**: PostgREST syntax (e.g., `?id=eq.5`, `?status=in.(ACTIVE,PENDING)`)

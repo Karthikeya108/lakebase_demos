@@ -12,11 +12,11 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog", "tko_2026")
+dbutils.widgets.text("catalog", "lakebase_demos")
 dbutils.widgets.text("schema", "lakebase_demo")
-dbutils.widgets.text("lakebase_project", "tko-2026-demo")
-dbutils.widgets.text("lakebase_db", "tko_2026_demo")
-dbutils.widgets.text("app_name", "tko-insurance-app")
+dbutils.widgets.text("lakebase_project", "lakebase-demos")
+dbutils.widgets.text("lakebase_db", "lakebase_demos")
+dbutils.widgets.text("app_name", "lakebase-demos-app")
 
 catalog = dbutils.widgets.get("catalog")
 schema = dbutils.widgets.get("schema")
