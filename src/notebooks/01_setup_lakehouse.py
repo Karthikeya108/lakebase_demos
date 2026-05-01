@@ -1,12 +1,12 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # Step 1: Setup Lakehouse (Unity Catalog Delta Tables)
-# MAGIC Creates a SQL warehouse, UC catalog/schema, and 10 insurance tables with ~570K total records.
+# MAGIC Creates a SQL warehouse, UC catalog/schema, and 10 demo tables with ~570K total records.
 # MAGIC All resources are created under the identity of the executor.
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog", "tko_2026")
+dbutils.widgets.text("catalog", "lakebase_demos")
 dbutils.widgets.text("schema", "lakebase_demo")
 
 catalog = dbutils.widgets.get("catalog")
@@ -22,12 +22,13 @@ print(f"Setting up {catalog}.{schema}")
 # COMMAND ----------
 
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.sql import EndpointInfoWarehouseType
 
 w = WorkspaceClient()
 me = w.current_user.me()
 print(f"Running as: {me.user_name}")
 
-warehouse_name = f"tko-2026-warehouse"
+warehouse_name = f"lakebase-demos-warehouse"
 warehouse_id = None
 
 # Check for existing warehouse
@@ -38,15 +39,15 @@ for wh in w.warehouses.list():
         break
 
 if not warehouse_id:
-    print(f"Creating SQL warehouse: {warehouse_name}")
+    print(f"Creating serverless SQL warehouse: {warehouse_name}")
     wh = w.warehouses.create(
         name=warehouse_name,
         cluster_size="Small",
         max_num_clusters=1,
         auto_stop_mins=10,
         enable_photon=True,
-        warehouse_type="PRO",
-        spot_instance_policy="COST_OPTIMIZED",
+        enable_serverless_compute=True,
+        warehouse_type=EndpointInfoWarehouseType.PRO,
     ).result()
     warehouse_id = wh.id
     print(f"Created warehouse: {warehouse_name} ({warehouse_id})")
@@ -57,7 +58,6 @@ print(f"Warehouse ID: {warehouse_id}")
 
 # COMMAND ----------
 
-spark.sql(f"CREATE CATALOG IF NOT EXISTS {catalog}")
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}")
 spark.sql(f"USE CATALOG {catalog}")
 spark.sql(f"USE SCHEMA {schema}")
