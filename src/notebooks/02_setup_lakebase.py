@@ -25,6 +25,7 @@ lakebase_db = dbutils.widgets.get("lakebase_db")
 # COMMAND ----------
 
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.errors import NotFound
 from databricks.sdk.service.postgres import Project, ProjectSpec
 
 w = WorkspaceClient()
@@ -34,22 +35,19 @@ print(f"Running as: {me.user_name}")
 try:
     project = w.postgres.get_project(name=f"projects/{project_name}")
     print(f"Project already exists: {project.name}")
-except Exception as e:
-    if "NOT_FOUND" in str(e) or "does not exist" in str(e).lower():
-        print(f"Creating Lakebase Autoscaling project: {project_name}")
-        op = w.postgres.create_project(
-            project=Project(
-                spec=ProjectSpec(
-                    display_name=project_name,
-                    pg_version="17"
-                )
-            ),
-            project_id=project_name
-        )
-        project = op.wait()
-        print(f"Created project: {project.name}")
-    else:
-        raise
+except NotFound:
+    print(f"Creating Lakebase Autoscaling project: {project_name}")
+    op = w.postgres.create_project(
+        project=Project(
+            spec=ProjectSpec(
+                display_name=project_name,
+                pg_version="17"
+            )
+        ),
+        project_id=project_name
+    )
+    project = op.wait()
+    print(f"Created project: {project.name}")
 
 # COMMAND ----------
 
