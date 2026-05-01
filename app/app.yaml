@@ -8,16 +8,16 @@ command:
 
 env:
   - name: DBSQL_WAREHOUSE_ID
-    value: "040fbcbc0f11bbaa"
+    value: "<populated-by-setup-job>"
   - name: LAKEBASE_HOST
-    value: "ep-old-rice-ean8eftx.database.northeurope.azuredatabricks.net"
+    value: "<populated-by-setup-job>"
   - name: LAKEBASE_DB
-    value: "lakebase_demos"
+    value: "<populated-by-setup-job>"
   - name: LAKEBASE_ENDPOINT
-    value: "projects/lakebase-demos/branches/production/endpoints/primary"
+    value: "<populated-by-setup-job>"
   - name: UC_CATALOG
-    value: "lakebase_demos"
+    value: "<populated-by-setup-job>"
   - name: UC_SCHEMA
-    value: "lakebase_demo"
+    value: "<populated-by-setup-job>"
   - name: LAKEBASE_DATA_API_URL
-    value: "https://ep-old-rice-ean8eftx.database.northeurope.azuredatabricks.net/api/2.0/workspace/4116661263058619/rest/lakebase_demos"
+    value: "<populated-by-setup-job>"

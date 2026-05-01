@@ -216,26 +216,29 @@ lakebase_demos/
 
 ### Prerequisites
 
-- Databricks CLI configured with a profile
+- Databricks CLI configured with a profile (`databricks auth login -p <profile>`)
 - Access to a Databricks workspace with Unity Catalog enabled
-- Permissions to create catalogs, SQL warehouses, Lakebase projects, and apps
+- An **existing UC catalog** the deployer can write to (see "Catalog requirement" below)
+- Permissions to create SQL warehouses, Lakebase projects, and apps
+
+### Catalog requirement
+
+The setup job creates the demo schema inside an existing catalog; it does **not** create the catalog itself (creating a catalog requires `CREATE CATALOG` on the metastore, which most workspaces don't grant). The default catalog name is `lakebase_demos` — override it at deploy time with `-var=catalog=<your-catalog>` to point at any catalog you can write to (e.g., `main`).
 
 ### Deploy Everything
 
-Update the variables in `databricks.yml` file.
-
 ```bash
 # 1. Validate the bundle
-databricks bundle validate
+databricks bundle validate -p <profile>
 
-# 2. Deploy resources to workspace
-databricks bundle deploy
+# 2. Deploy resources to workspace (use -var=catalog=... if your catalog is not lakebase_demos)
+databricks bundle deploy -p <profile>
 
 # 3. Deploy and start the app (creates it with placeholder config)
-databricks bundle run lakebase_demos_app
+databricks bundle run lakebase_demos_app -p <profile>
 
 # 4. Run the setup job (creates all infrastructure, data, and configures the app)
-databricks bundle run setup_lakebase_demos
+databricks bundle run setup_lakebase_demos -p <profile>
 ```
 
 ### Post-Deploy: Lakebase Data API Setup
