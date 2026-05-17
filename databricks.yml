@@ -1,28 +1,25 @@
 bundle:
-  name: tko-2026-insurance-demo
+  name: lakebase-demos
 
 include:
   - resources/*.yml
 
 variables:
   catalog:
-    default: "tko_2026"
+    default: "lakebase_demos"
   schema:
     default: "lakebase_demo"
   lakebase_project:
-    default: "tko-2026-demo"
+    default: "lakebase-demos"
   lakebase_db:
-    default: "tko_2026_demo"
+    default: "lakebase_demos"
+
 targets:
   dev:
     default: true
     mode: development
-    workspace: &workspace_config
-      host: https://adb-4116661263058619.19.azuredatabricks.net
-      profile: uc-demo-ws-ne
 
   prod:
     mode: production
     workspace:
-      <<: *workspace_config
       root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}

@@ -185,10 +185,10 @@ Uses background threading with `concurrent.futures.ThreadPoolExecutor` to fire t
 ## Project Structure
 
 ```
-tko_2026/
+lakebase_demos/
 ├── databricks.yml                    # DABs main config (variables, targets)
 ├── resources/
-│   ├── insurance_app.app.yml         # Databricks App resource definition
+│   ├── lakebase_demos_app.app.yml    # Databricks App resource definition
 │   └── setup_job.yml                 # 3-task setup job definition
 ├── src/notebooks/
 │   ├── 01_setup_lakehouse.py         # Creates SQL warehouse + UC catalog/schema + Delta tables
@@ -216,66 +216,42 @@ tko_2026/
 
 ### Prerequisites
 
-- Databricks CLI configured with a profile
+- Databricks CLI configured with a profile (`databricks auth login -p <profile>`)
 - Access to a Databricks workspace with Unity Catalog enabled
-- Permissions to create catalogs, SQL warehouses, Lakebase projects, and apps
+- An **existing UC catalog** the deployer can write to (see "Catalog requirement" below)
+- Permissions to create SQL warehouses, Lakebase projects, and apps
+
+### Catalog requirement
+
+The setup job creates the demo schema inside an existing catalog; it does **not** create the catalog itself (creating a catalog requires `CREATE CATALOG` on the metastore, which most workspaces don't grant). The default catalog name is `lakebase_demos` — override it at deploy time with `-var=catalog=<your-catalog>` to point at any catalog you can write to (e.g., `main`).
 
 ### Deploy Everything
 
-Update the variables in `databricks.yml` file.
-
 ```bash
 # 1. Validate the bundle
-databricks bundle validate
+databricks bundle validate -p <profile>
 
-# 2. Deploy resources to workspace
-databricks bundle deploy
+# 2. Deploy resources to workspace (use -var=catalog=... if your catalog is not lakebase_demos)
+databricks bundle deploy -p <profile>
 
 # 3. Deploy and start the app (creates it with placeholder config)
-databricks bundle run insurance_app
+databricks bundle run lakebase_demos_app -p <profile>
 
 # 4. Run the setup job (creates all infrastructure, data, and configures the app)
-databricks bundle run setup_insurance_demo
+databricks bundle run setup_lakebase_demos -p <profile>
 ```
 
-### Post-Deploy: Lakebase Data API Setup
+### Post-Deploy: Enable the Lakebase Data API
 
-The Data API requires additional manual steps after the setup job completes:
+The setup job creates the SP's Lakebase OAuth role and grants it to `authenticator` automatically (notebook 03). But two Data API knobs aren't exposed via API and have to be flipped in the Lakebase UI:
 
-1. **Enable the Data API** in the Lakebase UI:
-   - Navigate to your Lakebase project > Data API
-   - Click **Enable Data API**
+1. **Enable the Data API** — Lakebase project → **Data API** → **Enable Data API**.
+2. **Expose the `lakebase_demo` schema** — same page → **Settings** → **Advanced settings** → **Exposed schemas** → add `lakebase_demo` → **Save**.
+3. **Refresh the schema cache** on the Data API page.
 
-2. **Expose the `lakebase_demo` schema**:
-   - On the Data API page, go to **Settings** > **Advanced settings**
-   - Under **Exposed schemas**, add `lakebase_demo`
-   - Click **Save**
+The app will then be able to query Lakebase via the Data API source.
 
-3. **Create the SP role for Data API access** (run in the Lakebase SQL Editor):
-   ```sql
-   -- Create the SP role using the databricks_auth extension
-   CREATE EXTENSION IF NOT EXISTS databricks_auth;
-   SELECT databricks_create_role('<app-sp-client-id>', 'SERVICE_PRINCIPAL');
-
-   -- Grant the SP role to the authenticator (required for Data API)
-   GRANT "<app-sp-client-id>" TO authenticator;
-
-   -- Grant schema and table access
-   GRANT USAGE ON SCHEMA lakebase_demo TO "<app-sp-client-id>";
-   GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA lakebase_demo TO "<app-sp-client-id>";
-   ```
-
-   Replace `<app-sp-client-id>` with the app's service principal client ID (found via the Databricks Apps UI or `databricks apps get <app-name>`).
-
-4. **Refresh the schema cache** in the Data API page after granting permissions.
-
-5. **Update `LAKEBASE_DATA_API_URL`** in `app.yaml`:
-   ```
-   https://<lakebase-host>/api/2.0/workspace/<workspace-id>/rest/<database-name>
-   ```
-   Then redeploy the app: `databricks bundle deploy && databricks bundle run insurance_app`
-
-> **Important**: The database owner (whoever created the Lakebase project) cannot use the Data API directly. The `authenticator` role cannot assume owner privileges. The app uses the service principal's token instead.
+> **Note**: The database owner (whoever created the Lakebase project) cannot use the Data API directly — the `authenticator` role can't assume owner privileges. That's why the app authenticates as a service principal instead.
 
 ### What the Setup Job Does
 
@@ -295,10 +271,10 @@ Defined in `databricks.yml`, overridable per target or at deploy time:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `catalog` | `tko_2026` | Unity Catalog catalog name |
+| `catalog` | `lakebase_demos` | Unity Catalog catalog name |
 | `schema` | `lakebase_demo` | UC schema name |
-| `lakebase_project` | `tko-2026-demo` | Lakebase Autoscaling project name |
-| `lakebase_db` | `tko_2026_demo` | Lakebase Postgres database name |
+| `lakebase_project` | `lakebase-demos` | Lakebase Autoscaling project name |
+| `lakebase_db` | `lakebase_demos` | Lakebase Postgres database name |
 
 Override at deploy time:
 
@@ -314,8 +290,8 @@ databricks bundle deploy -var="catalog=my_catalog" -var="lakebase_project=my-pro
 ```bash
 # Deploy to prod
 databricks bundle deploy -t prod
-databricks bundle run insurance_app -t prod
-databricks bundle run setup_insurance_demo -t prod
+databricks bundle run lakebase_demos_app -t prod
+databricks bundle run setup_lakebase_demos -t prod
 ```
 
 ## Branching Demo Details
@@ -334,7 +310,7 @@ Branch actions modify data only on the branch, leaving production untouched. The
 
 The Lakebase Data API uses a PostgREST-compatible REST interface. Key details:
 
-- **URL format**: `{REST_ENDPOINT}/{schema}/{table}` (e.g., `.../rest/tko_2026_demo/lakebase_demo/policy_types`)
+- **URL format**: `{REST_ENDPOINT}/{schema}/{table}` (e.g., `.../rest/lakebase_demos/lakebase_demo/policy_types`)
 - **Authentication**: OAuth bearer token in the `Authorization` header
 - **Pagination**: `?limit=N&offset=M` query parameters; use `Prefer: count=exact` header for total counts
 - **Filtering**: PostgREST syntax (e.g., `?id=eq.5`, `?status=in.(ACTIVE,PENDING)`)
