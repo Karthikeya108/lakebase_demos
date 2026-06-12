@@ -1,0 +1,6 @@
+resources:
+  apps:
+    lakebase_demos_app:
+      name: "lakebase-demos-app"
+      description: "Lakehouse vs Lakebase Performance Demo"
+      source_code_path: ../app

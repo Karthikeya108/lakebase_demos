@@ -12,11 +12,11 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog", "tko_2026")
+dbutils.widgets.text("catalog", "lakebase_demos")
 dbutils.widgets.text("schema", "lakebase_demo")
-dbutils.widgets.text("lakebase_project", "tko-2026-demo")
-dbutils.widgets.text("lakebase_db", "tko_2026_demo")
-dbutils.widgets.text("app_name", "tko-insurance-app")
+dbutils.widgets.text("lakebase_project", "lakebase-demos")
+dbutils.widgets.text("lakebase_db", "lakebase_demos")
+dbutils.widgets.text("app_name", "lakebase-demos-app")
 
 catalog = dbutils.widgets.get("catalog")
 schema = dbutils.widgets.get("schema")
@@ -207,17 +207,22 @@ env:
 # Update the app.yaml in workspace
 if source_code_path:
     import base64
+    from databricks.sdk.service.workspace import ImportFormat
     w.workspace.import_(
         path=f"{source_code_path}/app.yaml",
         content=base64.b64encode(app_yaml_content.encode()).decode(),
-        format="AUTO",
+        format=ImportFormat.AUTO,
         overwrite=True,
     )
     print(f"Updated app.yaml at {source_code_path}/app.yaml")
 
     # Redeploy the app with updated config
     print("Redeploying app with updated configuration...")
-    w.apps.deploy(app_name=app_name, source_code_path=source_code_path)
+    from databricks.sdk.service.apps import AppDeployment
+    w.apps.deploy(
+        app_name=app_name,
+        app_deployment=AppDeployment(source_code_path=source_code_path),
+    )
     print("App redeployment triggered.")
 else:
     print("WARNING: No active deployment found. Deploy the app first, then re-run this task.")

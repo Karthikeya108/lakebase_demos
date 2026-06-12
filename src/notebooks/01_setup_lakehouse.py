@@ -1,12 +1,12 @@
 # Databricks notebook source
 # MAGIC %md
 # MAGIC # Step 1: Setup Lakehouse (Unity Catalog Delta Tables)
-# MAGIC Creates a SQL warehouse, UC catalog/schema, and 10 insurance tables with ~570K total records.
+# MAGIC Creates a SQL warehouse, UC catalog/schema, and 10 demo tables with ~570K total records.
 # MAGIC All resources are created under the identity of the executor.
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog", "tko_2026")
+dbutils.widgets.text("catalog", "lakebase_demos")
 dbutils.widgets.text("schema", "lakebase_demo")
 
 catalog = dbutils.widgets.get("catalog")
@@ -22,12 +22,13 @@ print(f"Setting up {catalog}.{schema}")
 # COMMAND ----------
 
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.sql import EndpointInfoWarehouseType
 
 w = WorkspaceClient()
 me = w.current_user.me()
 print(f"Running as: {me.user_name}")
 
-warehouse_name = f"tko-2026-warehouse"
+warehouse_name = f"lakebase-demos-warehouse"
 warehouse_id = None
 
 # Check for existing warehouse
@@ -38,15 +39,15 @@ for wh in w.warehouses.list():
         break
 
 if not warehouse_id:
-    print(f"Creating SQL warehouse: {warehouse_name}")
+    print(f"Creating serverless SQL warehouse: {warehouse_name}")
     wh = w.warehouses.create(
         name=warehouse_name,
         cluster_size="Small",
         max_num_clusters=1,
         auto_stop_mins=10,
         enable_photon=True,
-        warehouse_type="PRO",
-        spot_instance_policy="COST_OPTIMIZED",
+        enable_serverless_compute=True,
+        warehouse_type=EndpointInfoWarehouseType.PRO,
     ).result()
     warehouse_id = wh.id
     print(f"Created warehouse: {warehouse_name} ({warehouse_id})")
@@ -57,7 +58,6 @@ print(f"Warehouse ID: {warehouse_id}")
 
 # COMMAND ----------
 
-spark.sql(f"CREATE CATALOG IF NOT EXISTS {catalog}")
 spark.sql(f"CREATE SCHEMA IF NOT EXISTS {catalog}.{schema}")
 spark.sql(f"USE CATALOG {catalog}")
 spark.sql(f"USE SCHEMA {schema}")
@@ -70,131 +70,22 @@ print(f"Catalog and schema ready: {catalog}.{schema}")
 
 # COMMAND ----------
 
-tables_sql = {
-    "policy_types": """
-        CREATE TABLE IF NOT EXISTS policy_types (
-            policy_type_id INT,
-            type_name STRING,
-            description STRING,
-            has_expiry BOOLEAN,
-            billing_frequency STRING
-        ) USING DELTA
-    """,
-    "agents": """
-        CREATE TABLE IF NOT EXISTS agents (
-            agent_id INT,
-            first_name STRING,
-            last_name STRING,
-            email STRING,
-            phone STRING,
-            license_number STRING,
-            hire_date DATE,
-            region STRING,
-            is_active BOOLEAN
-        ) USING DELTA
-    """,
-    "customers": """
-        CREATE TABLE IF NOT EXISTS customers (
-            customer_id INT,
-            first_name STRING,
-            last_name STRING,
-            date_of_birth DATE,
-            email STRING,
-            phone STRING,
-            address STRING,
-            city STRING,
-            state STRING,
-            zip_code STRING,
-            created_at TIMESTAMP
-        ) USING DELTA
-    """,
-    "policies": """
-        CREATE TABLE IF NOT EXISTS policies (
-            policy_id INT,
-            customer_id INT,
-            agent_id INT,
-            policy_type_id INT,
-            policy_number STRING,
-            start_date DATE,
-            end_date DATE,
-            premium_amount DECIMAL(12,2),
-            status STRING,
-            created_at TIMESTAMP
-        ) USING DELTA
-    """,
-    "vehicles": """
-        CREATE TABLE IF NOT EXISTS vehicles (
-            vehicle_id INT,
-            policy_id INT,
-            vin STRING,
-            make STRING,
-            model STRING,
-            year INT,
-            color STRING,
-            license_plate STRING
-        ) USING DELTA
-    """,
-    "beneficiaries": """
-        CREATE TABLE IF NOT EXISTS beneficiaries (
-            beneficiary_id INT,
-            policy_id INT,
-            first_name STRING,
-            last_name STRING,
-            relationship STRING,
-            percentage DECIMAL(5,2),
-            date_of_birth DATE
-        ) USING DELTA
-    """,
-    "coverages": """
-        CREATE TABLE IF NOT EXISTS coverages (
-            coverage_id INT,
-            policy_id INT,
-            coverage_type STRING,
-            coverage_limit DECIMAL(12,2),
-            deductible DECIMAL(10,2),
-            effective_date DATE
-        ) USING DELTA
-    """,
-    "premiums": """
-        CREATE TABLE IF NOT EXISTS premiums (
-            premium_id INT,
-            policy_id INT,
-            amount DECIMAL(12,2),
-            due_date DATE,
-            paid_date DATE,
-            payment_method STRING,
-            status STRING
-        ) USING DELTA
-    """,
-    "claims": """
-        CREATE TABLE IF NOT EXISTS claims (
-            claim_id INT,
-            policy_id INT,
-            claim_number STRING,
-            claim_type STRING,
-            incident_date DATE,
-            report_date DATE,
-            claim_amount DECIMAL(12,2),
-            status STRING,
-            description STRING
-        ) USING DELTA
-    """,
-    "claim_payments": """
-        CREATE TABLE IF NOT EXISTS claim_payments (
-            payment_id INT,
-            claim_id INT,
-            amount DECIMAL(12,2),
-            payment_date DATE,
-            payment_type STRING,
-            status STRING,
-            notes STRING
-        ) USING DELTA
-    """,
+# Each table's schema is defined inline at the corresponding createDataFrame call
+# below. The DDL strings double as documentation: the table is created with
+# this exact schema on first saveAsTable, and the strings ensure Spark infers
+# INT (not BIGINT) for IDs and DECIMAL (not DOUBLE) for monetary fields.
+SCHEMAS = {
+    "policy_types": "policy_type_id INT, type_name STRING, description STRING, has_expiry BOOLEAN, billing_frequency STRING",
+    "agents": "agent_id INT, first_name STRING, last_name STRING, email STRING, phone STRING, license_number STRING, hire_date DATE, region STRING, is_active BOOLEAN",
+    "customers": "customer_id INT, first_name STRING, last_name STRING, date_of_birth DATE, email STRING, phone STRING, address STRING, city STRING, state STRING, zip_code STRING, created_at TIMESTAMP",
+    "policies": "policy_id INT, customer_id INT, agent_id INT, policy_type_id INT, policy_number STRING, start_date DATE, end_date DATE, premium_amount DECIMAL(12,2), status STRING, created_at TIMESTAMP",
+    "vehicles": "vehicle_id INT, policy_id INT, vin STRING, make STRING, model STRING, year INT, color STRING, license_plate STRING",
+    "beneficiaries": "beneficiary_id INT, policy_id INT, first_name STRING, last_name STRING, relationship STRING, percentage DECIMAL(5,2), date_of_birth DATE",
+    "coverages": "coverage_id INT, policy_id INT, coverage_type STRING, coverage_limit DECIMAL(12,2), deductible DECIMAL(10,2), effective_date DATE",
+    "premiums": "premium_id INT, policy_id INT, amount DECIMAL(12,2), due_date DATE, paid_date DATE, payment_method STRING, status STRING",
+    "claims": "claim_id INT, policy_id INT, claim_number STRING, claim_type STRING, incident_date DATE, report_date DATE, claim_amount DECIMAL(12,2), status STRING, description STRING",
+    "claim_payments": "payment_id INT, claim_id INT, amount DECIMAL(12,2), payment_date DATE, payment_type STRING, status STRING, notes STRING",
 }
-
-for table_name, ddl in tables_sql.items():
-    spark.sql(ddl)
-    print(f"Created table: {table_name}")
 
 # COMMAND ----------
 
@@ -205,11 +96,15 @@ for table_name, ddl in tables_sql.items():
 
 from pyspark.sql import Row
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 
 # COMMAND ----------
 
-# Check if already populated
-row_count = spark.sql("SELECT COUNT(*) AS cnt FROM policy_types").collect()[0]["cnt"]
+# Check if already populated (table may not exist yet on first run)
+try:
+    row_count = spark.sql("SELECT COUNT(*) AS cnt FROM policy_types").collect()[0]["cnt"]
+except Exception:
+    row_count = 0
 if row_count > 0:
     print("Tables already populated, skipping data generation.")
     dbutils.notebook.exit("ALREADY_POPULATED")
@@ -230,7 +125,7 @@ policy_types_data = [
     (10, "Disability", "Disability insurance coverage", True, "MONTHLY"),
 ]
 
-df = spark.createDataFrame(policy_types_data, ["policy_type_id", "type_name", "description", "has_expiry", "billing_frequency"])
+df = spark.createDataFrame(policy_types_data, SCHEMAS["policy_types"])
 df.write.mode("append").saveAsTable("policy_types")
 print(f"policy_types: {df.count()} rows")
 
@@ -255,7 +150,7 @@ for i in range(1, 501):
         region=regions[i%8], is_active=(i%10!=0)
     ))
 
-spark.createDataFrame(agents_data).write.mode("append").saveAsTable("agents")
+spark.createDataFrame(agents_data, SCHEMAS["agents"]).write.mode("append").saveAsTable("agents")
 print(f"agents: {len(agents_data)} rows")
 
 # COMMAND ----------
@@ -286,7 +181,7 @@ for i in range(1, 50001):
         created_at=datetime(2015,1,1)+timedelta(days=i%3650)
     ))
 
-spark.createDataFrame(customers_data).write.mode("append").saveAsTable("customers")
+spark.createDataFrame(customers_data, SCHEMAS["customers"]).write.mode("append").saveAsTable("customers")
 print(f"customers: {len(customers_data)} rows")
 
 # COMMAND ----------
@@ -301,12 +196,12 @@ for i in range(1, 100001):
         policy_type_id=(i%10)+1, policy_number=f"POL-{str(i).zfill(8)}",
         start_date=date(2018,1,1)+timedelta(days=i%2500),
         end_date=date(2018,1,1)+timedelta(days=(i%2500)+365),
-        premium_amount=float(round(200+(i*37)%4800, 2)),
+        premium_amount=Decimal(str(round(200+(i*37)%4800, 2))),
         status=status_vals[i%5],
         created_at=datetime(2018,1,1)+timedelta(days=i%2500)
     ))
 
-spark.createDataFrame(policies_data).write.mode("append").saveAsTable("policies")
+spark.createDataFrame(policies_data, SCHEMAS["policies"]).write.mode("append").saveAsTable("policies")
 print(f"policies: {len(policies_data)} rows")
 
 # COMMAND ----------
@@ -325,7 +220,7 @@ for i in range(1, 60001):
         license_plate=f"{chr(65+i%26)}{chr(65+(i*3)%26)}{chr(65+(i*7)%26)}-{str(i%10000).zfill(4)}"
     ))
 
-spark.createDataFrame(vehicles_data).write.mode("append").saveAsTable("vehicles")
+spark.createDataFrame(vehicles_data, SCHEMAS["vehicles"]).write.mode("append").saveAsTable("vehicles")
 print(f"vehicles: {len(vehicles_data)} rows")
 
 # COMMAND ----------
@@ -343,11 +238,11 @@ for i in range(1, 80001):
     beneficiaries_data.append(Row(
         beneficiary_id=i, policy_id=((i-1)%100000)+1,
         first_name=bfn[i%15], last_name=bln[(i*11)%20],
-        relationship=rels[i%5], percentage=float(round(100.0/(1+(i%3)), 2)),
+        relationship=rels[i%5], percentage=Decimal(str(round(100.0/(1+(i%3)), 2))),
         date_of_birth=date(1960,1,1)+timedelta(days=(i*29)%18000)
     ))
 
-spark.createDataFrame(beneficiaries_data).write.mode("append").saveAsTable("beneficiaries")
+spark.createDataFrame(beneficiaries_data, SCHEMAS["beneficiaries"]).write.mode("append").saveAsTable("beneficiaries")
 print(f"beneficiaries: {len(beneficiaries_data)} rows")
 
 # COMMAND ----------
@@ -361,12 +256,12 @@ for i in range(1, 100001):
     coverages_data.append(Row(
         coverage_id=i, policy_id=((i-1)%100000)+1,
         coverage_type=cov_types[i%8],
-        coverage_limit=float(round(10000+(i*43)%490000, 2)),
-        deductible=float(round(250+(i*17)%4750, 2)),
+        coverage_limit=Decimal(str(round(10000+(i*43)%490000, 2))),
+        deductible=Decimal(str(round(250+(i*17)%4750, 2))),
         effective_date=date(2018,1,1)+timedelta(days=i%2500)
     ))
 
-spark.createDataFrame(coverages_data).write.mode("append").saveAsTable("coverages")
+spark.createDataFrame(coverages_data, SCHEMAS["coverages"]).write.mode("append").saveAsTable("coverages")
 print(f"coverages: {len(coverages_data)} rows")
 
 # COMMAND ----------
@@ -381,12 +276,12 @@ for i in range(1, 100001):
     status = 'OVERDUE' if i%8==0 else ('PENDING' if i%12==0 else 'PAID')
     premiums_data.append(Row(
         premium_id=i, policy_id=((i-1)%100000)+1,
-        amount=float(round(50+(i*23)%950, 2)),
+        amount=Decimal(str(round(50+(i*23)%950, 2))),
         due_date=due, paid_date=paid,
         payment_method=methods[i%4], status=status
     ))
 
-spark.createDataFrame(premiums_data).write.mode("append").saveAsTable("premiums")
+spark.createDataFrame(premiums_data, SCHEMAS["premiums"]).write.mode("append").saveAsTable("premiums")
 print(f"premiums: {len(premiums_data)} rows")
 
 # COMMAND ----------
@@ -406,11 +301,11 @@ for i in range(1, 80001):
         claim_type=claim_types[i%6],
         incident_date=date(2019,1,1)+timedelta(days=i%2200),
         report_date=date(2019,1,1)+timedelta(days=(i%2200)+(i%30)),
-        claim_amount=float(round(500+(i*67)%49500, 2)),
+        claim_amount=Decimal(str(round(500+(i*67)%49500, 2))),
         status=claim_statuses[i%5], description=descs[i%6]
     ))
 
-spark.createDataFrame(claims_data).write.mode("append").saveAsTable("claims")
+spark.createDataFrame(claims_data, SCHEMAS["claims"]).write.mode("append").saveAsTable("claims")
 print(f"claims: {len(claims_data)} rows")
 
 # COMMAND ----------
@@ -424,13 +319,13 @@ payments_data = []
 for i in range(1, 100001):
     payments_data.append(Row(
         payment_id=i, claim_id=((i-1)%80000)+1,
-        amount=float(round(100+(i*31)%9900, 2)),
+        amount=Decimal(str(round(100+(i*31)%9900, 2))),
         payment_date=date(2019,3,1)+timedelta(days=i%2100),
         payment_type=pay_types[i%3], status=pay_statuses[i%4],
         notes=notes[i%5]
     ))
 
-spark.createDataFrame(payments_data).write.mode("append").saveAsTable("claim_payments")
+spark.createDataFrame(payments_data, SCHEMAS["claim_payments"]).write.mode("append").saveAsTable("claim_payments")
 print(f"claim_payments: {len(payments_data)} rows")
 
 # COMMAND ----------
